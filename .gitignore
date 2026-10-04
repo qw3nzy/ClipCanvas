@@ -1,0 +1,26 @@
+# Generated runtime, dependencies, logs, and QA artifacts
+/.runtime/
+/.backups/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+*.log
+
+# User uploads, exports, projects, and downloaded speech models
+/data/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+access-token*.txt
+/.aws/
+/.codex/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

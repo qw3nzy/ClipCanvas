@@ -8,6 +8,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT/'.runtime'/'deps'))
@@ -122,6 +123,60 @@ class QueueTests(unittest.TestCase):
         done()
         self.assertEqual(visited,[2,2])
         self.assertEqual(server.get_job(job_id)['completed_parts'],[{'index':0,'size':123}])
+
+
+class RenderEncodingTests(unittest.TestCase):
+    def exercise_failure(self, mode, error, expected_error=None):
+        job_id = uuid.uuid4().hex
+        directory = server.DATA/'jobs'/job_id
+        directory.mkdir()
+        server.JOBS[job_id] = {'id':job_id,'status':'running'}
+        request = server.Render(source_id='a'*32,canvas={'width':240,'height':240},
+            video={'x':0,'y':0,'w':240,'h':240,'fit':'contain'},background={'enabled':False},
+            advertising={'enabled':True,'asset_id':'b'*32,'start':1,'repeat':False},
+            parts=[{'start':0,'end':4}],encoder=mode)
+        calls = []
+        def segment(*args):
+            name,encoder = args[4],args[-1]
+            calls.append((name,encoder))
+            if encoder=='nvidia' and len(calls)==2:
+                raise error
+            (directory/name).write_bytes(b'mp4')
+        def concat(job_id,arguments,*args):
+            (directory/arguments[-1]).write_bytes(b'mp4')
+        metadata = {'duration':5,'width':240,'height':240,'fps':30,'frames':150,'size':3}
+        try:
+            with patch.object(server,'validate_render',return_value=({}, {'duration':1})), \
+                 patch.object(server,'available_encoders',return_value=('cpu','nvidia')), \
+                 patch.object(server,'render_segment',side_effect=segment), \
+                 patch.object(server,'run_ffmpeg',side_effect=concat), \
+                 patch.object(server,'output_metadata',return_value=metadata):
+                if expected_error:
+                    with self.assertRaises(expected_error):
+                        server.render_job(job_id,request)
+                else:
+                    server.render_job(job_id,request)
+            return calls,server.JOBS[job_id]
+        finally:
+            server.JOBS.pop(job_id,None)
+
+    def test_auto_rebuilds_entire_part_after_gpu_failure(self):
+        calls,job = self.exercise_failure('auto',server.FFmpegError('GPU unavailable'))
+        self.assertEqual([encoder for _,encoder in calls],['nvidia','nvidia','cpu','cpu','cpu'])
+        self.assertEqual(calls[0][0],calls[2][0])
+        self.assertEqual(job['outputs'][0]['encoder'],'cpu')
+        self.assertEqual(len(job['completed_parts']),1)
+        self.assertEqual(job['encoder_fallback'],'NVIDIA → процессор')
+
+    def test_explicit_gpu_failure_is_not_silently_retried_on_cpu(self):
+        calls,job = self.exercise_failure('nvidia',server.FFmpegError('GPU unavailable'),server.FFmpegError)
+        self.assertEqual([encoder for _,encoder in calls],['nvidia','nvidia'])
+        self.assertNotIn('completed_parts',job)
+
+    def test_cancellation_does_not_trigger_fallback(self):
+        calls,job = self.exercise_failure('auto',server.Cancelled(),server.Cancelled)
+        self.assertEqual([encoder for _,encoder in calls],['nvidia','nvidia'])
+        self.assertNotIn('encoder_fallback',job)
 
 
 class ApiSafetyTests(unittest.TestCase):

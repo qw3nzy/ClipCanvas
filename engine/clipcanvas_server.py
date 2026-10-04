@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from clipcanvas_media import captions_for_timeline, normalize_cues, parse_subtitles, subtitle_recommendation, timeline
+from clipcanvas_encoding import available_encoders, encoding_arguments, select_encoder
 
 ROOT = Path(os.environ.get('CLIPCANVAS_APP_ROOT', Path(__file__).resolve().parent.parent)).resolve()
 DATA = Path(os.environ.get('CLIPCANVAS_DATA', str(ROOT/'data'))).resolve()
@@ -270,6 +271,7 @@ class Render(Strict):
     advertising: Advertising = Field(default_factory=Advertising)
     parts: list[Part] = Field(min_length=1, max_length=1000)
     quality: Literal['standard', 'high'] = 'standard'
+    encoder: Literal['auto', 'cpu', 'nvidia'] = 'auto'
     fps: Literal[24, 30, 60] = 30
     zip: bool = False
     @model_validator(mode='after')
@@ -393,7 +395,8 @@ def health(request: Request = None):
             'root':str(ROOT), 'instance_id':INSTANCE_ID, 'pid':os.getpid(),
             'capabilities':{'auth_required':REMOTE, 'audio_tracks':True, 'embedded_subtitles':True,
                 'bitmap_ocr':False, 'advertising':True, 'projects':True, 'retry':True,
-                'max_parts':1000, 'subtitle_styles':['clean','word','cinema'], 'sample_max_source_duration':30}}
+                'max_parts':1000, 'subtitle_styles':['clean','word','cinema'], 'sample_max_source_duration':30,
+                'render_encoders':list(available_encoders(FFMPEG))}}
     if REMOTE and not (request and authorized(request)):
         result.pop('root',None)
         result.pop('pid',None)
@@ -599,6 +602,10 @@ def terminate_process(process):
         process.wait()
 
 
+class FFmpegError(RuntimeError):
+    pass
+
+
 def run_ffmpeg(job_id, arguments, duration, offset=0, share=100, log_name='ffmpeg.log'):
     directory = DATA/'jobs'/job_id
     if cancelled(job_id):
@@ -632,7 +639,7 @@ def run_ffmpeg(job_id, arguments, duration, offset=0, share=100, log_name='ffmpe
             raise Cancelled()
         if code:
             detail = (directory/log_name).read_text('utf-8',errors='replace')[-1800:]
-            raise RuntimeError(f'Ошибка FFmpeg ({log_name}). '+detail)
+            raise FFmpegError(f'Ошибка FFmpeg ({log_name}). '+detail)
 
 
 def even(n):
@@ -748,7 +755,7 @@ def output_metadata(path):
                 'size':path.stat().st_size}
 
 
-def render_segment(job_id,request,source,segment,name,progress_offset,progress_share,is_ad=False,paused_source=None):
+def render_segment(job_id,request,source,segment,name,progress_offset,progress_share,is_ad=False,paused_source=None,encoder='cpu'):
     directory = DATA/'jobs'/job_id
     duration = segment['duration']
     speed = request.advertising.speed if is_ad else 1
@@ -837,9 +844,8 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         audio_filter += f',adelay={round(delay*1000)}:all=1'
     audio_filter += f',apad=whole_dur={duration:.6f},atrim=duration={duration:.6f}[sound]'
     filters.append(audio_filter)
-    args += ['-filter_complex_threads','2','-filter_complex',';'.join(filters),'-map','[out]','-map','[sound]',
-             '-t',f'{duration:.6f}','-c:v','libx264','-preset','veryfast' if request.quality=='standard' else 'medium',
-             '-crf','23' if request.quality=='standard' else '18','-threads',str(min(8,os.cpu_count() or 4)),
+    args += ['-filter_complex_threads',str(min(8,os.cpu_count() or 4)),'-filter_complex',';'.join(filters),'-map','[out]','-map','[sound]',
+             '-t',f'{duration:.6f}',*encoding_arguments(encoder,request.quality),
              '-c:a','aac','-ac','2','-ar','48000','-b:a','192k','-movflags','+faststart',name]
     run_ffmpeg(job_id,args,duration,progress_offset,progress_share,name.replace('.mp4','.log'))
     metadata = output_metadata(directory/name)
@@ -850,6 +856,10 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
 
 
 def validate_render(request):
+    try:
+        select_encoder(request.encoder, available_encoders(FFMPEG) if request.encoder != 'cpu' else ('cpu',))
+    except ValueError as error:
+        raise HTTPException(400,str(error)) from error
     source = asset(request.source_id,'video')
     audio_index(source,request.audio_stream_index)
     if any(p.end > source['duration']+.05 for p in request.parts):
@@ -878,6 +888,8 @@ def render_timeline(request,part,ad):
 
 def render_job(job_id,request):
     source,ad = validate_render(request)
+    encoder = select_encoder(request.encoder, available_encoders(FFMPEG) if request.encoder != 'cpu' else ('cpu',))
+    update(job_id,render_encoder=encoder)
     directory = DATA/'jobs'/job_id
     files,outputs,completed = [],[],[]
     previous = {x['index']:x for x in JOBS[job_id].get('completed_parts',[])}
@@ -895,14 +907,25 @@ def render_job(job_id,request):
             continue
         plan = render_timeline(request,part,ad)
         total_duration = sum(s['duration'] for s in plan)
-        fragments = []
-        update(job_id,message=f'Рендер части {i+1} из {len(request.parts)}')
-        for n,segment in enumerate(plan):
-            fragment = f'segment-{i+1:04d}-{n+1:04d}.mp4' if len(plan)>1 else name
-            render_segment(job_id,request,ad if segment['kind']=='advert' else source,segment,fragment,
-                i*95/len(request.parts)+95/len(request.parts)*segment['output_start']/total_duration,
-                95/len(request.parts)*segment['duration']/total_duration,segment['kind']=='advert',source)
-            fragments.append(fragment)
+        while True:
+            fragments = []
+            encoder_label = 'NVIDIA' if encoder=='nvidia' else 'процессоре'
+            update(job_id,message=f'Рендер части {i+1} из {len(request.parts)} на {encoder_label}')
+            try:
+                for n,segment in enumerate(plan):
+                    fragment = f'segment-{i+1:04d}-{n+1:04d}.mp4' if len(plan)>1 else name
+                    render_segment(job_id,request,ad if segment['kind']=='advert' else source,segment,fragment,
+                        i*95/len(request.parts)+95/len(request.parts)*segment['output_start']/total_duration,
+                        95/len(request.parts)*segment['duration']/total_duration,segment['kind']=='advert',source,encoder)
+                    fragments.append(fragment)
+                break
+            except FFmpegError as error:
+                if encoder!='nvidia' or request.encoder!='auto':
+                    raise
+                # Rebuild the entire current part: mixed encoder headers cannot be safely concatenated.
+                encoder = 'cpu'
+                update(job_id,render_encoder=encoder,encoder_fallback='NVIDIA → процессор',
+                       encoder_fallback_reason=str(error),progress=i*95/len(request.parts))
         if len(fragments)>1:
             concat_name = f'concat-{i+1:04d}.txt'
             (directory/concat_name).write_text(''.join(f"file '{f}'\n" for f in fragments),'utf-8')
@@ -919,7 +942,7 @@ def render_job(job_id,request):
             write_srt(directory/srt_name,final_cues)
             part_files.append(file_record(job_id,srt_name))
         output = {'index':i,'name':name,'source_start':part.start,'source_end':part.end,
-                  'planned_duration':total_duration,**metadata,'timeline':plan}
+                  'planned_duration':total_duration,**metadata,'timeline':plan,'encoder':encoder}
         complete = {'index':i,'size':metadata['size'],'files':part_files,'output':output}
         completed.append(complete)
         files.extend(part_files)

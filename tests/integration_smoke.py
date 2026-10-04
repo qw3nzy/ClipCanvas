@@ -122,6 +122,7 @@ def center_pixel(path, second):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--keep-server', action='store_true')
+    parser.add_argument('--encoder', choices=['auto', 'cpu', 'nvidia'], default='auto')
     args = parser.parse_args()
     qa_root = ROOT / '.runtime' / 'qa'
     qa_root.mkdir(parents=True, exist_ok=True)
@@ -187,9 +188,13 @@ def main():
             'advertising': {'enabled': True, 'asset_id': advert['id'], 'start': 2,
                             'repeat': True, 'interval': 4, 'speed': 1,
                             'geometry': {'x': 0, 'y': 145, 'w': 240, 'h': 135, 'fit': 'contain'}},
-            'parts': [{'start': 0, 'end': 6}], 'quality': 'standard', 'fps': 24, 'zip': False,
+            'parts': [{'start': 0, 'end': 6}], 'quality': 'standard', 'encoder': args.encoder, 'fps': 24, 'zip': False,
         }
         rendered = client.wait(client.request('/api/render', payload)['id'])
+        expected_encoder = args.encoder if args.encoder != 'auto' else (
+            'nvidia' if 'nvidia' in health['capabilities']['render_encoders'] else 'cpu')
+        assert rendered['outputs'][0]['encoder'] == expected_encoder, rendered
+        passed.append('requested H.264 encoder used: ' + expected_encoder)
         assert not any(f['name'].endswith('.zip') for f in rendered['files']), rendered
         movie = next(f for f in rendered['files'] if f['name'].endswith('.mp4'))
         output = directory / 'rendered.mp4'

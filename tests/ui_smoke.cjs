@@ -46,6 +46,7 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => document.getElementById('advertInfo').textContent.includes('advert.mp4'));
     await value('advertStart', '00:00:02');
     await value('advertInterval', 4);
+    await page.locator('.split-details > summary').click();
     await page.locator('#rangeMode').click();
     await value('cutStart', '00:00:00'); await value('cutEnd', '00:00:06');
     await page.locator('#addRange').click();

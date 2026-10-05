@@ -28,7 +28,7 @@ child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],crea
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def do_GET(self):
-        data={'app':'ClipCanvas','version':'2.0.0','root':str(root),'instance_id':os.environ['CLIPCANVAS_INSTANCE_ID'],'pid':os.getpid()}
+        data={'app':'ClipCanvas','version':'2.1.0','root':str(root),'instance_id':os.environ['CLIPCANVAS_INSTANCE_ID'],'pid':os.getpid()}
         self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers(); self.wfile.write(json.dumps(data).encode())
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))

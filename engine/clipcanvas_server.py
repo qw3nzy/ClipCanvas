@@ -49,6 +49,9 @@ JOBS: dict[str, dict] = {}
 PROCESSES: dict[str, subprocess.Popen] = {}
 FUTURES: dict[str, concurrent.futures.Future] = {}
 JOB_TYPES: dict[str, tuple] = {}
+JOB_SIDECARS = {'request':'request.json','cues':'cues.json','reviewed_cues':'reviewed-cues.json',
+                'overview':'overview.json','changes':'changes.json'}
+PROJECT_SUMMARIES: dict[str, tuple] = {}
 LOCK = threading.RLock()
 SHUTTING_DOWN = False
 SERVER = None
@@ -56,7 +59,7 @@ SESSIONS: set[str] = set()
 ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 if (ROOT/'allowed-origins.json').exists():
     ALLOWED_ORIGINS.update(json.loads((ROOT/'allowed-origins.json').read_text('utf-8')))
-app = FastAPI(title='ClipCanvas', version='2.0.0', docs_url=None, redoc_url=None)
+app = FastAPI(title='ClipCanvas', version='2.1.0', docs_url=None, redoc_url=None)
 
 
 def now():
@@ -391,7 +394,8 @@ def audio_index(source, selected):
 
 @app.get('/api/health')
 def health(request: Request = None):
-    result = {'status':'ok', 'app':'ClipCanvas', 'version':'2.0.0', 'ffmpeg':Path(FFMPEG).exists(),
+    result = {'status':'ok', 'app':'ClipCanvas', 'version':'2.1.0', 'ffmpeg':Path(FFMPEG).exists(),
+            'authenticated':not REMOTE or bool(request and authorized(request)),
             'root':str(ROOT), 'instance_id':INSTANCE_ID, 'pid':os.getpid(),
             'capabilities':{'auth_required':REMOTE, 'audio_tracks':True, 'embedded_subtitles':True,
                 'bitmap_ocr':False, 'advertising':True, 'projects':True, 'retry':True,
@@ -492,11 +496,20 @@ def media(asset_id: str):
 
 def persist(job_id):
     with LOCK:
-        atomic_json(DATA/'jobs'/job_id/'job.json', JOBS[job_id])
+        directory = DATA/'jobs'/job_id
+        job = JOBS[job_id]
+        # Large payloads have their own files; progress updates only write small metadata.
+        for key, filename in JOB_SIDECARS.items():
+            if key in job and not (directory/filename).exists():
+                atomic_json(directory/filename, job[key])
+        atomic_json(directory/'job.json', {k:v for k,v in job.items() if k not in JOB_SIDECARS})
 
 
 def update(job_id, **values):
     with LOCK:
+        for key, filename in JOB_SIDECARS.items():
+            if key in values:
+                atomic_json(DATA/'jobs'/job_id/filename, values[key])
         JOBS[job_id].update(values, updated_at=now())
         persist(job_id)
 
@@ -566,7 +579,8 @@ def register_job_type(name, model, task):
 
 def clean_job_temporary_files(job_id):
     directory = DATA/'jobs'/identifier(job_id)
-    for pattern in ('segment-*.mp4','*.freeze.png','*.ass','concat-*.txt','*.zip.tmp','speech.wav'):
+    for pattern in ('segment-*.mp4','*.freeze.png','*.ass','concat-*.txt','*.zip.tmp','speech.wav',
+                    'features.tmp','wave.tmp','ai-*.tmp','ai-frame-*.jpg'):
         for path in directory.glob(pattern):
             try:
                 path.unlink(missing_ok=True)
@@ -1143,19 +1157,29 @@ async def import_subtitles(source_id: str | None = None,file: UploadFile = File(
         await file.close()
 
 
+def job_summary(job):
+    keys = ('id','type','status','progress','message','error','created_at','updated_at','files')
+    result = {k:v for k,v in job.items() if k in keys}
+    result['files'] = [f for f in job.get('files',[]) if not f.get('internal')]
+    result['retryable'] = bool(job.get('request'))
+    return result
+
+
 @app.get('/api/jobs')
-def list_jobs():
+def list_jobs(summary: bool = False):
     with LOCK:
-        return {'jobs':sorted([dict(j) for j in JOBS.values()],key=lambda j:j.get('created_at',''),reverse=True)}
+        values = [job_summary(j) if summary else dict(j) for j in JOBS.values()]
+        return {'jobs':sorted(values,key=lambda j:j.get('created_at',''),reverse=True)}
 
 
 @app.get('/api/jobs/{job_id}')
-def get_job(job_id: str):
+def get_job(job_id: str, brief: bool = False):
     identifier(job_id)
     with LOCK:
         if job_id not in JOBS:
             raise HTTPException(404,'Задача не найдена.')
-        return dict(JOBS[job_id])
+        job = JOBS[job_id]
+        return job_summary(job) if brief and job['status'] in {'queued','running'} else dict(job)
 
 
 @app.post('/api/jobs/{job_id}/cancel')
@@ -1224,11 +1248,19 @@ def save_project(request: Project):
 
 
 @app.get('/api/projects')
-def list_projects():
+def list_projects(summary: bool = False):
     values = []
     for path in (DATA/'projects').glob('*.json'):
         try:
-            values.append(json.loads(path.read_text('utf-8')))
+            fingerprint = (path.stat().st_mtime_ns, path.stat().st_size)
+            previous = PROJECT_SUMMARIES.get(path.stem)
+            if summary and previous and previous[0] == fingerprint:
+                values.append(previous[1])
+                continue
+            project = json.loads(path.read_text('utf-8'))
+            brief = {k:v for k,v in project.items() if k in {'id','name','source_id','created_at','updated_at'}}
+            PROJECT_SUMMARIES[path.stem] = (fingerprint, brief)
+            values.append(brief if summary else project)
         except (ValueError,OSError):
             pass
     return {'projects':sorted(values,key=lambda p:p.get('updated_at',''),reverse=True)}
@@ -1308,12 +1340,15 @@ for saved in (DATA/'jobs').glob('*/job.json'):
     try:
         job = json.loads(saved.read_text('utf-8'))
         identifier(job['id'])
+        for key, filename in JOB_SIDECARS.items():
+            if key not in job and (saved.parent/filename).is_file():
+                job[key] = json.loads((saved.parent/filename).read_text('utf-8'))
         job.setdefault('created_at',datetime.fromtimestamp(saved.stat().st_mtime,timezone.utc).isoformat())
         job.setdefault('completed_parts',[])
         job.setdefault('outputs',[])
         if job['status'] in {'running','queued'}:
             job.update(status='error',error='Программа была закрыта. Нажмите «Продолжить», готовые части сохранятся.',message='Обработка прервана; можно продолжить.')
-            atomic_json(saved,job)
+            atomic_json(saved,{k:v for k,v in job.items() if k not in JOB_SIDECARS or not (saved.parent/JOB_SIDECARS[k]).is_file()})
         JOBS[job['id']] = job
     except (ValueError,KeyError,OSError,HTTPException):
         continue
@@ -1321,6 +1356,12 @@ from url_import import register_url_routes
 register_url_routes(app,{'DATA':DATA,'create_job':create_job,'update':update,'cancelled':cancelled,
     'probe':probe,'PROCESSES':PROCESSES,'LOCK':LOCK,'Cancelled':Cancelled,'FFMPEG':FFMPEG,
     'terminate_process':terminate_process,'register_job_type':register_job_type})
+from clipcanvas_studio import register_studio_routes
+studio = register_studio_routes(app, {name: globals()[name] for name in (
+    'ROOT','DATA','create_job','update','cancelled','Cancelled','LOCK','PROCESSES',
+    'asset','audio_index','cache_path','cached_result','run_ffmpeg','file_record','atomic_json',
+    'extract_job','Extract','get_job','group_words','Render','Geometry','validate_render','probe',
+    'identifier','register_job_type')})
 app.mount('/',StaticFiles(directory=str(ROOT/'web'),html=True),name='web')
 
 

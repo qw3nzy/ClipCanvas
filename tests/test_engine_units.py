@@ -204,8 +204,10 @@ class ApiSafetyTests(unittest.TestCase):
         try:
             with TestClient(server.app,base_url='http://127.0.0.1:8787') as client:
                 self.assertEqual(client.get('/api/assets').status_code,401)
+                self.assertFalse(client.get('/api/health').json()['authenticated'])
                 self.assertEqual(client.post('/api/auth',json={'token':'wrong'}).status_code,401)
                 self.assertEqual(client.post('/api/auth',json={'token':server.TOKEN}).status_code,200)
+                self.assertTrue(client.get('/api/health').json()['authenticated'])
                 self.assertEqual(client.get('/api/assets').status_code,200)
                 self.assertEqual(client.get('/api/assets',headers={'Origin':'https://evil.invalid'}).status_code,403)
                 self.assertEqual(client.post('/api/logout').status_code,200)

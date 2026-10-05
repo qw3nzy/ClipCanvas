@@ -28,6 +28,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from clipcanvas_media import captions_for_timeline, normalize_cues, parse_subtitles, subtitle_recommendation, timeline
 from clipcanvas_encoding import available_encoders, encoding_arguments, select_encoder
+from clipcanvas_composition import (composition_timeline, remap_after_cuts, timed_items_for_timeline,
+                                   normalize_rotation, banner_rotation_filter, banner_overlay_position)
+from clipcanvas_asr import SpeechModel, recognize
+from clipcanvas_layout import BannerRules, rotated_bounds
 
 ROOT = Path(os.environ.get('CLIPCANVAS_APP_ROOT', Path(__file__).resolve().parent.parent)).resolve()
 DATA = Path(os.environ.get('CLIPCANVAS_DATA', str(ROOT/'data'))).resolve()
@@ -50,8 +54,9 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 FUTURES: dict[str, concurrent.futures.Future] = {}
 JOB_TYPES: dict[str, tuple] = {}
 JOB_SIDECARS = {'request':'request.json','cues':'cues.json','reviewed_cues':'reviewed-cues.json',
-                'overview':'overview.json','changes':'changes.json'}
+                'overview':'overview.json','changes':'changes.json','project':'automatic-project.json'}
 PROJECT_SUMMARIES: dict[str, tuple] = {}
+BANNER_MEDIA_LOCKS: dict[str, threading.Lock] = {}
 LOCK = threading.RLock()
 SHUTTING_DOWN = False
 SERVER = None
@@ -59,7 +64,7 @@ SESSIONS: set[str] = set()
 ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 if (ROOT/'allowed-origins.json').exists():
     ALLOWED_ORIGINS.update(json.loads((ROOT/'allowed-origins.json').read_text('utf-8')))
-app = FastAPI(title='ClipCanvas', version='2.1.0', docs_url=None, redoc_url=None)
+app = FastAPI(title='ClipCanvas', version='2.3.1', docs_url=None, redoc_url=None)
 
 
 def now():
@@ -133,6 +138,11 @@ class Geometry(Strict):
     w: float = Field(ge=16, le=15360)
     h: float = Field(ge=16, le=15360)
     fit: Literal['contain', 'cover', 'stretch'] = 'contain'
+    rotation: float = Field(default=0, ge=-360, le=360)
+    @model_validator(mode='after')
+    def angle(self):
+        self.rotation = normalize_rotation(self.rotation)
+        return self
 
 
 class Canvas(Strict):
@@ -151,23 +161,32 @@ class Background(Strict):
     color: str = Field(default='#111827', pattern=r'^#[0-9a-fA-F]{6}$')
 
 
+class ChromaKey(Strict):
+    enabled: bool = False
+    color: str = Field(default='#00ff00', pattern=r'^#[0-9a-fA-F]{6}$')
+    similarity: float = Field(default=.15, ge=.01, le=1)
+    blend: float = Field(default=.05, ge=0, le=1)
+
+
 class Banner(Strict):
+    id: str | None = Field(default=None, max_length=200)
+    name: str = Field(default='Баннер', max_length=200)
     enabled: bool = False
     start: float = Field(default=0, ge=0)
     end: float = Field(default=10, ge=0)
     asset_id: str | None = None
+    timebase: Literal['source', 'output'] = 'source'
+    loop: bool = True
+    offset: float = Field(default=0, ge=0, le=86400)
+    volume: float = Field(default=0, ge=0, le=1)
+    chromakey: ChromaKey = Field(default_factory=ChromaKey)
     geometry: Geometry = Field(default_factory=lambda: Geometry(x=0, y=0, w=16, h=16))
-    @model_validator(mode='before')
-    @classmethod
-    def inactive(cls, values):
-        if isinstance(values, dict) and not values.get('enabled', False):
-            values = {**values, 'start': 0, 'end': 10, 'asset_id': None,
-                      'geometry': {'x':0, 'y':0, 'w':16, 'h':16, 'fit':'contain'}}
-        return values
+    instructions: str = Field(default='', max_length=4000)
+    layout_rules: BannerRules = Field(default_factory=BannerRules)
     @model_validator(mode='after')
     def interval(self):
         if self.enabled and (not self.asset_id or self.end <= self.start):
-            raise ValueError('Проверьте изображение и время показа баннера.')
+            raise ValueError('Проверьте файл и время показа баннера.')
         return self
 
 
@@ -183,12 +202,36 @@ class Word(Strict):
         return self
 
 
+class CaptionAppearance(Strict):
+    font: str | None = Field(default=None, min_length=1, max_length=100, pattern=r'^[^,\r\n{}\\]+$')
+    size: int | None = Field(default=None, ge=16, le=160)
+    color: str | None = Field(default=None, pattern=r'^#[0-9a-fA-F]{6}$')
+    bold: bool | None = None
+    italic: bool | None = None
+    x: float | None = Field(default=None, ge=0, le=100)
+    y: float | None = Field(default=None, ge=0, le=100)
+    width: float | None = Field(default=None, ge=10, le=100)
+    align: Literal['left', 'center', 'right'] | None = None
+    line_spacing: float | None = Field(default=None, ge=.8, le=3)
+    outline: float | None = Field(default=None, ge=0, le=12)
+    outline_color: str | None = Field(default=None, pattern=r'^#[0-9a-fA-F]{6}$')
+    shadow: float | None = Field(default=None, ge=0, le=20)
+    shadow_color: str | None = Field(default=None, pattern=r'^#[0-9a-fA-F]{6}$')
+    background: bool | None = None
+    background_color: str | None = Field(default=None, pattern=r'^#[0-9a-fA-F]{6}$')
+    background_opacity: float | None = Field(default=None, ge=0, le=1)
+
+
 class Cue(Strict):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     text: str = Field(max_length=2000)
     words: list[Word] = Field(default_factory=list, max_length=1000)
     timing_quality: str = 'phrase'
+    appearance: CaptionAppearance | None = None
+    render_lines: list[str] | None = Field(default=None, max_length=100)
+    render_font_size: float | None = Field(default=None, ge=1, le=640)
+    render_y_offset: float | None = Field(default=None, ge=-160, le=160)
     @model_validator(mode='after')
     def interval(self):
         if self.end <= self.start:
@@ -196,6 +239,8 @@ class Cue(Strict):
         for word in self.words:
             if word.start < self.start-.02 or word.end > self.end+.02:
                 raise ValueError('Время слова выходит за границы фразы.')
+        if self.render_lines is not None and (not self.render_lines or any(len(line)>2000 for line in self.render_lines)):
+            raise ValueError('Проверьте строки переноса субтитра.')
         return self
 
 
@@ -203,18 +248,24 @@ class Subtitles(Strict):
     enabled: bool = False
     size: int = Field(default=52, ge=16, le=160)
     color: str = Field(default='#ffffff', pattern=r'^#[0-9a-fA-F]{6}$')
-    y: float = Field(default=84, ge=5, le=95)
+    y: float = Field(default=84, ge=0, le=100)
+    x: float = Field(default=50, ge=0, le=100)
+    width: float = Field(default=88, ge=10, le=100)
+    font: str | None = Field(default=None, min_length=1, max_length=100, pattern=r'^[^,\r\n{}\\]+$')
+    bold: bool | None = None
+    italic: bool = False
+    align: Literal['left', 'center', 'right'] = 'center'
+    line_spacing: float = Field(default=1.15, ge=.8, le=3)
     style: Literal['clean', 'word', 'cinema'] = 'clean'
     outline: float = Field(default=2, ge=0, le=12)
+    outline_color: str = Field(default='#000000', pattern=r'^#[0-9a-fA-F]{6}$')
+    shadow: float = Field(default=0, ge=0, le=20)
+    shadow_color: str = Field(default='#000000', pattern=r'^#[0-9a-fA-F]{6}$')
     background: bool = False
+    background_color: str = Field(default='#000000', pattern=r'^#[0-9a-fA-F]{6}$')
+    background_opacity: float = Field(default=.5, ge=0, le=1)
     highlight_color: str = Field(default='#a3e635', pattern=r'^#[0-9a-fA-F]{6}$')
     cues: list[Cue] = Field(default_factory=list, max_length=100000)
-    @model_validator(mode='before')
-    @classmethod
-    def inactive(cls, values):
-        if isinstance(values, dict) and not values.get('enabled', False):
-            values = {**values, 'size': 52, 'color': '#ffffff', 'y': 84, 'cues': []}
-        return values
     @model_validator(mode='after')
     def normalize(self):
         self.cues = [Cue.model_validate(c) for c in normalize_cues([x.model_dump() for x in self.cues])]
@@ -264,30 +315,38 @@ class Advertising(Strict):
 
 
 class Render(Strict):
+    schema_version: int = Field(default=2, ge=1, le=2)
     source_id: str
     audio_stream_index: int | None = Field(default=None, ge=0)
     canvas: Canvas
     video: Geometry
     background: Background
     banner: Banner = Field(default_factory=Banner)
+    banners: list[Banner] = Field(default_factory=list, max_length=100)
     subtitles: Subtitles = Field(default_factory=Subtitles)
     advertising: Advertising = Field(default_factory=Advertising)
     parts: list[Part] = Field(min_length=1, max_length=1000)
+    cuts: list[Part] = Field(default_factory=list, max_length=1000)
     quality: Literal['standard', 'high'] = 'standard'
     encoder: Literal['auto', 'cpu', 'nvidia'] = 'auto'
     fps: Literal[24, 30, 60] = 30
     zip: bool = False
     @model_validator(mode='after')
     def bounds(self):
+        if self.video.rotation or (self.advertising.geometry and self.advertising.geometry.rotation):
+            raise ValueError('Поворот доступен для баннеров; поворот видео и рекламного ролика пока не поддерживается.')
         layers = [self.video]
         if self.banner.enabled:
             layers.append(self.banner.geometry)
+        layers.extend(banner.geometry for banner in self.banners if banner.enabled)
         if self.advertising.enabled and self.advertising.geometry:
             layers.append(self.advertising.geometry)
         for g in layers:
             if g.w > self.canvas.width*4 or g.h > self.canvas.height*4:
                 raise ValueError('Слой слишком велик для выбранного холста.')
-            if g.x+g.w <= 0 or g.y+g.h <= 0 or g.x >= self.canvas.width or g.y >= self.canvas.height:
+            visible = rotated_bounds(g.model_dump())
+            if (visible['x']+visible['w'] <= 0 or visible['y']+visible['h'] <= 0
+                    or visible['x'] >= self.canvas.width or visible['y'] >= self.canvas.height):
                 raise ValueError('Слой должен находиться хотя бы частично внутри холста.')
         return self
 
@@ -299,7 +358,7 @@ class Source(Strict):
 
 class Transcribe(Source):
     language: Literal['auto', 'ru', 'en', 'es', 'de', 'fr', 'uk'] = 'ru'
-    model: Literal['tiny', 'base', 'small'] = 'base'
+    model: SpeechModel = 'base'
 
 
 class Extract(Source):
@@ -377,6 +436,10 @@ def asset(asset_id: str, kind: str | None = None):
         with LOCK:
             result.update(probe(media))
             atomic_json(path, result)
+    if result['kind'] == 'banner' and not result.get('media_type'):
+        with LOCK:
+            result.update(banner_metadata(media))
+            atomic_json(path, result)
     return {**result, 'path': media}
 
 
@@ -394,12 +457,13 @@ def audio_index(source, selected):
 
 @app.get('/api/health')
 def health(request: Request = None):
-    result = {'status':'ok', 'app':'ClipCanvas', 'version':'2.1.0', 'ffmpeg':Path(FFMPEG).exists(),
+    result = {'status':'ok', 'app':'ClipCanvas', 'version':'2.3.1', 'ffmpeg':Path(FFMPEG).exists(),
             'authenticated':not REMOTE or bool(request and authorized(request)),
             'root':str(ROOT), 'instance_id':INSTANCE_ID, 'pid':os.getpid(),
             'capabilities':{'auth_required':REMOTE, 'audio_tracks':True, 'embedded_subtitles':True,
                 'bitmap_ocr':False, 'advertising':True, 'projects':True, 'retry':True,
-                'max_parts':1000, 'subtitle_styles':['clean','word','cinema'], 'sample_max_source_duration':30,
+                'max_parts':1000, 'subtitle_styles':['clean','word','cinema'], 'sample_max_source_duration':None,
+                'composition_version':2, 'multiple_banners':True, 'non_destructive_cuts':True,
                 'render_encoders':list(available_encoders(FFMPEG))}}
     if REMOTE and not (request and authorized(request)):
         result.pop('root',None)
@@ -427,6 +491,39 @@ def logout(request: Request):
     return response
 
 
+def banner_metadata(path):
+    """Detect actual motion, including animated GIF/APNG, without flattening it."""
+    with av.open(str(path)) as container:
+        videos = list(container.streams.video)
+        if not videos:
+            raise ValueError('В файле баннера нет изображения или видео.')
+        stream = videos[0]
+        formats = set(container.format.name.split(','))
+        pixel_format = stream.codec_context.format.name if stream.codec_context.format else ''
+        has_alpha = (bool(formats & {'gif','apng'}) or pixel_format in {'pal8','rgba','bgra','argb','abgr'}
+                     or pixel_format.startswith(('yuva','gbrap')) or stream.metadata.get('alpha_mode') == '1')
+        video_codec = stream.codec_context.name
+        still = any(name.endswith('_pipe') for name in formats) or bool(formats & {'image2', 'image2pipe', 'ico'})
+        if formats & {'gif', 'apng'}:
+            frames = container.decode(video=0)
+            next(frames, None)
+            still = next(frames, None) is None
+        width, height = stream.codec_context.width, stream.codec_context.height
+        if not width or not height:
+            frame = next(container.decode(video=0), None)
+            if frame is None:
+                raise ValueError('Не удалось прочитать баннер.')
+            width, height = frame.width, frame.height
+    if still:
+        return {'media_type': 'image', 'width': width, 'height': height, 'audio': False}
+    return {**probe(path), 'media_type': 'video', 'has_alpha': has_alpha, 'video_codec': video_codec}
+
+
+def banner_decoder_options(source):
+    # FFmpeg's native VP9 decoder drops WebM alpha; libvpx exposes its alpha plane.
+    return ['-c:v','libvpx-vp9'] if source.get('has_alpha') and source.get('video_codec') == 'vp9' else []
+
+
 @app.post('/api/uploads')
 async def upload(kind: Literal['video', 'banner', 'advert'], file: UploadFile = File(...)):
     import asyncio
@@ -442,8 +539,8 @@ async def upload(kind: Literal['video', 'banner', 'advert'], file: UploadFile = 
         with path.open('wb') as output:
             while chunk := await file.read(4*1024*1024):
                 total += len(chunk)
-                if kind == 'banner' and total > 30*1024*1024:
-                    raise ValueError('Баннер должен быть не больше 30 МБ.')
+                if kind == 'banner' and total > 512*1024*1024:
+                    raise ValueError('Видеобаннер должен быть не больше 512 МБ; изображение — не больше 30 МБ.')
                 if shutil.disk_usage(DATA).free < len(chunk)+16*1024*1024:
                     raise ValueError('Недостаточно свободного места для загрузки.')
                 digest.update(chunk)
@@ -453,14 +550,18 @@ async def upload(kind: Literal['video', 'banner', 'advert'], file: UploadFile = 
         if kind in {'video', 'advert'}:
             meta = await asyncio.to_thread(probe, path)
         else:
-            normalized = folder/'banner.png'
-            completed = await asyncio.to_thread(subprocess.run,
-                [FFMPEG,'-y','-v','error','-i',str(path),'-frames:v','1',str(normalized)], capture_output=True, timeout=30)
-            if completed.returncode:
-                raise ValueError('Изображение не удалось прочитать.')
-            if normalized != path:
-                path.unlink()
-            path, meta = normalized, {}
+            meta = await asyncio.to_thread(banner_metadata, path)
+            if meta['media_type'] == 'image':
+                if total > 30*1024*1024:
+                    raise ValueError('Изображение баннера должно быть не больше 30 МБ.')
+                normalized = folder/'banner.png'
+                completed = await asyncio.to_thread(subprocess.run,
+                    [FFMPEG,'-y','-v','error','-i',str(path),'-frames:v','1',str(normalized)], capture_output=True, timeout=30)
+                if completed.returncode:
+                    raise ValueError('Изображение не удалось прочитать.')
+                if normalized != path:
+                    path.unlink()
+                path = normalized
         result = {'id':asset_id, 'kind':kind, 'name':file.filename or 'file', 'stored_name':path.name,
                   'sha256':digest.hexdigest(), 'size':total, 'created_at':now(), **meta}
         atomic_json(folder/'asset.json', result)
@@ -492,6 +593,139 @@ def get_asset(asset_id: str):
 def media(asset_id: str):
     value = asset(asset_id)
     return FileResponse(value['path'])
+
+
+class BannerPreview(Strict):
+    asset_id: str
+    chromakey: ChromaKey = Field(default_factory=ChromaKey)
+    time: float = Field(default=0, ge=0, le=86400)
+
+
+@app.post('/api/banners/preview')
+def banner_preview(request: BannerPreview):
+    source = asset(request.asset_id, 'banner')
+    motion = source.get('media_type') == 'video'
+    if not motion and not request.chromakey.enabled:
+        return {'url':f'/api/media/{request.asset_id}', 'cached':True}
+    moment = round(min(request.time, max(0, source.get('duration', 0)-1/(source.get('fps') or 30))), 3) if motion else 0
+    signature = hashlib.sha256(json.dumps({'source':source['sha256'], 'key':request.chromakey.model_dump(),
+                                          'time':moment, 'version':3},sort_keys=True).encode()).hexdigest()
+    directory = DATA/'cache'/'banners'
+    directory.mkdir(exist_ok=True)
+    path = directory/(signature+'.png')
+    cached = path.is_file()
+    if not cached:
+        temporary = directory/(signature+'.'+uuid.uuid4().hex+'.png')
+        try:
+            graph = ['[0:v:0]scale=iw*sar:ih,setsar=1[posterraw]']
+            graph += banner_key_filters('posterraw',request.chromakey,'keyed','preview') if request.chromakey.enabled else ['[posterraw]format=rgba[keyed]']
+            result = subprocess.run([FFMPEG,'-y','-hide_banner','-loglevel','error',
+                *(['-ss',str(moment)] if motion else []), *banner_decoder_options(source), '-i',str(source['path']),
+                '-filter_complex',';'.join(graph), '-map','[keyed]','-frames:v','1',str(temporary)], capture_output=True, timeout=30,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            if result.returncode:
+                raise HTTPException(400,'Не удалось подготовить кадр баннера. Проверьте файл и параметры цвета.')
+            os.replace(temporary,path)
+        except subprocess.TimeoutExpired as error:
+            raise HTTPException(408,'Подготовка баннера заняла слишком много времени. Уменьшите размер изображения.') from error
+        finally:
+            temporary.unlink(missing_ok=True)
+    return {'url':f'/api/banners/preview/{signature}.png', 'cached':cached, 'time':moment}
+
+
+@app.get('/api/banners/media/{asset_id}')
+def banner_media(asset_id: str):
+    source = asset(asset_id, 'banner')
+    if source.get('media_type') != 'video':
+        return FileResponse(source['path'])
+    alpha = source.get('has_alpha', False)
+    extension = '.webm' if alpha else '.mp4'
+    signature = hashlib.sha256(('banner-browser-v3:'+source['sha256']).encode()).hexdigest()
+    directory = DATA/'cache'/'banner-media'
+    directory.mkdir(exist_ok=True)
+    path = directory/(signature+extension)
+    with LOCK:
+        conversion_lock = BANNER_MEDIA_LOCKS.setdefault(signature, threading.Lock())
+    # Serialize just this asset; rendering/cancellation keeps its own queue and lock.
+    if not conversion_lock.acquire(timeout=185):
+        raise HTTPException(408, 'Видеобаннер ещё подготавливается. Повторите попытку.')
+    try:
+        if not path.is_file():
+            temporary = directory/(signature+'.'+uuid.uuid4().hex+extension)
+            try:
+                audio = source.get('recommended_audio_stream_index')
+                codecs = (['-c:v','libvpx-vp9','-lossless','1','-deadline','realtime','-cpu-used','4',
+                           '-pix_fmt','yuva420p','-auto-alt-ref','0','-c:a','libopus'] if alpha else
+                          ['-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart'])
+                process = subprocess.Popen([FFMPEG,'-y','-hide_banner','-loglevel','error',*banner_decoder_options(source),'-i',str(source['path']),
+                    '-map',f'0:{source["video_stream_index"]}', *(['-map',f'0:{audio}'] if audio is not None else ['-an']),
+                    '-vf','scale=iw*sar:ih,setsar=1,scale=w=min(1280\\,iw):h=min(1280\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1',
+                    '-t',str(source['duration']),*codecs,'-ac','2','-ar','48000','-b:a','160k',str(temporary)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                deadline = time.monotonic()+180
+                try:
+                    while process.poll() is None:
+                        if SHUTTING_DOWN:
+                            raise HTTPException(503, 'Программа завершает работу.')
+                        if time.monotonic() >= deadline:
+                            raise HTTPException(408, 'Подготовка видеобаннера заняла слишком много времени. Используйте более короткое видео.')
+                        time.sleep(.1)
+                    if process.returncode or not temporary.is_file():
+                        raise HTTPException(400, 'Не удалось подготовить видеобаннер для браузера.')
+                    os.replace(temporary, path)
+                finally:
+                    if process.poll() is None:
+                        terminate_process(process)
+            finally:
+                temporary.unlink(missing_ok=True)
+    finally:
+        conversion_lock.release()
+    return FileResponse(path, media_type='video/webm' if alpha else 'video/mp4')
+
+
+def banner_audio_file(job_id, source):
+    """Loop a separate audio stream exactly at video duration, even if source audio is longer."""
+    selected = source['recommended_audio_stream_index']
+    signature = hashlib.sha256(f'banner-audio-v1:{source["sha256"]}:{selected}:{source["duration"]}'.encode()).hexdigest()
+    directory = DATA/'cache'/'banner-audio'
+    directory.mkdir(exist_ok=True)
+    path = directory/(signature+'.wav')
+    with LOCK:
+        conversion_lock = BANNER_MEDIA_LOCKS.setdefault(signature, threading.Lock())
+    while not conversion_lock.acquire(timeout=.1):
+        if cancelled(job_id):
+            raise Cancelled()
+    try:
+        if not path.is_file():
+            track = next(t for t in source['audio_streams'] if t['index'] == selected)
+            offset = track['start_time']-source.get('video_start_time',0)
+            audio_filter = 'asetpts=PTS-STARTPTS'
+            if offset > 0:
+                audio_filter += f',adelay={round(offset*1000)}:all=1'
+            elif offset < 0:
+                audio_filter += f',atrim=start={-offset:.6f},asetpts=PTS-STARTPTS'
+            audio_filter += f',apad=whole_dur={source["duration"]:.6f},atrim=duration={source["duration"]:.6f}'
+            temporary = directory/(signature+'.'+uuid.uuid4().hex+'.wav')
+            try:
+                run_ffmpeg(job_id,['-i',str(source['path']),'-map',f'0:{selected}','-vn','-af',audio_filter,
+                    '-ac','2','-ar','48000','-c:a','pcm_s16le',str(temporary)], source['duration'], share=0, log_name='banner-audio.log')
+                os.replace(temporary,path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    finally:
+        conversion_lock.release()
+    return path
+
+
+@app.get('/api/banners/preview/{filename}')
+def banner_preview_file(filename: str):
+    if not re.fullmatch(r'[a-f0-9]{64}\.png',filename):
+        raise HTTPException(404,'Предпросмотр баннера не найден.')
+    path = DATA/'cache'/'banners'/filename
+    if not path.is_file():
+        raise HTTPException(404,'Предпросмотр баннера отсутствует. Обновите параметры.')
+    return FileResponse(path,media_type='image/png')
 
 
 def persist(job_id):
@@ -669,6 +903,16 @@ def layer_filter(label, geometry, out):
     return f'[{label}]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,format=rgba,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[{out}]'
 
 
+def banner_key_filters(label, key, out, prefix):
+    """Same alpha-preserving key for cached preview and final composition."""
+    return [
+        f'[{label}]format=rgba,split=3[{prefix}image][{prefix}original][{prefix}color]',
+        f'[{prefix}original]alphaextract[{prefix}alpha]',
+        f'[{prefix}color]colorkey=0x{key.color.lstrip("#")}:{key.similarity}:{key.blend},alphaextract[{prefix}mask]',
+        f'[{prefix}alpha][{prefix}mask]blend=all_mode=multiply[{prefix}combined]',
+        f'[{prefix}image][{prefix}combined]alphamerge[{out}]']
+
+
 def ass_time(seconds):
     cs = max(0,round(seconds*100))
     return f'{cs//360000}:{cs//6000%60:02d}:{cs//100%60:02d}.{cs%100:02d}'
@@ -716,7 +960,7 @@ def word_caption_events(cue,start,end,normal,highlight):
     return result
 
 
-def write_ass(path, request, part):
+def write_ass_legacy(path, request, part):
     c,sub = request.canvas,request.subtitles
     primary = ass_color(sub.color)
     secondary = ass_color(sub.color)
@@ -745,6 +989,78 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for a,b,text in pieces:
             events.append(f'Dialogue: 0,{ass_time(a-part.start)},{ass_time(b-part.start)},Default,,0,0,0,,{position}{text}\n')
     path.write_text(header+''.join(events),'utf-8-sig')
+
+
+def caption_appearance(sub, cue):
+    values = {name: getattr(sub, name) for name in CaptionAppearance.model_fields}
+    values['font'] = values['font'] or ('Georgia' if sub.style == 'cinema' else 'Arial')
+    if values['bold'] is None:
+        values['bold'] = sub.style != 'cinema'
+    if cue.appearance:
+        values.update(cue.appearance.model_dump(exclude_none=True))
+    return values
+
+
+def write_ass(path, request, part):
+    """Render explicit preview line breaks and canonical canvas coordinates.
+
+    Old projects keep libass' original automatic wrapping until the editor has
+    supplied measured lines. Explicit lines avoid browser/libass wrap drift.
+    """
+    c, sub = request.canvas, request.subtitles
+    extended = {'font','bold','italic','x','width','align','line_spacing','outline_color',
+                'shadow','shadow_color','background_color','background_opacity'}
+    defaults = Subtitles()
+    if not any(cue.render_lines or cue.appearance for cue in sub.cues) and all(getattr(sub,key)==getattr(defaults,key) for key in extended):
+        return write_ass_legacy(path, request, part)
+    header = f'''[Script Info]
+ScriptType: v4.00+
+PlayResX: {c.width}
+PlayResY: {c.height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,52,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,5,0,0,0,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+'''
+    events = []
+    for cue in sub.cues:
+        start, end = max(cue.start, part.start), min(cue.end, part.end)
+        if start >= end or not cue.text.strip():
+            continue
+        style = caption_appearance(sub, cue)
+        lines = cue.render_lines or cue.text.splitlines()
+        # Never render stale cached wrapping after a text edit.
+        if re.sub(r'\s+', '', ''.join(lines)) != re.sub(r'\s+', '', cue.text):
+            lines = cue.text.splitlines()
+        size, line_height = style['size'], style['size']*style['line_spacing']
+        x, y, width = c.width*style['x']/100, c.height*style['y']/100, c.width*style['width']/100
+        alignment = {'left':4, 'center':5, 'right':6}[style['align']]
+        text_x = x + ({'left':-1, 'center':0, 'right':1}[style['align']])*width/2
+        if style['background'] and style['background_opacity'] > 0:
+            pad = size*.18
+            left, top, box_width, box_height = x-width/2-pad, y-len(lines)*line_height/2-pad, width+2*pad, len(lines)*line_height+2*pad
+            alpha = round((1-style['background_opacity'])*255)
+            tags = r'{\an7\pos('+f'{left:.3f},{top:.3f}'+r')\p1\bord0\shad0\1c'+ass_color(style['background_color'])+r'&\1a&H'+f'{alpha:02X}'+r'&}'
+            drawing = f'm 0 0 l {box_width:.3f} 0 {box_width:.3f} {box_height:.3f} 0 {box_height:.3f}'
+            events.append(f'Dialogue: 0,{ass_time(start-part.start)},{ass_time(end-part.start)},Default,,0,0,0,,{tags}{drawing}\n')
+        for index, line in enumerate(lines):
+            # CSS font-size is an em size; ASS uses the font's ascent+descent.
+            # Canvas supplies measured conversion and middle-baseline correction
+            # alongside explicit lines so both renderers place the same glyphs.
+            line_y = y+(index-(len(lines)-1)/2)*line_height+(cue.render_y_offset or 0)
+            font_size = cue.render_font_size if cue.render_font_size is not None else size
+            tags = (r'{\an'+str(alignment)+r'\q2\pos('+f'{text_x:.3f},{line_y:.3f}'+r')\fn'+style['font']+
+                    r'\fs'+str(font_size)+r'\b'+('1' if style['bold'] else '0')+r'\i'+('1' if style['italic'] else '0')+
+                    r'\1c'+ass_color(style['color'])+r'&\3c'+ass_color(style['outline_color'])+r'&\4c'+ass_color(style['shadow_color'])+
+                    r'&\bord'+str(style['outline'])+r'\shad'+str(style['shadow'])+'}')
+            line_cue = cue.model_copy(update={'text': line, 'words': [word for word in cue.words if word.text.strip() in line]})
+            pieces = word_caption_events(line_cue,start,end,style['color'],sub.highlight_color) if sub.style == 'word' else [(start,end,ass_text(line))]
+            for a, b, text in pieces:
+                events.append(f'Dialogue: 1,{ass_time(a-part.start)},{ass_time(b-part.start)},Default,,0,0,0,,{tags}{text}\n')
+    path.write_text(header+''.join(events), 'utf-8-sig')
 
 
 def srt_time(seconds):
@@ -798,10 +1114,39 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
             raise RuntimeError('Не удалось получить кадр для рекламной вставки.')
         args += ['-loop','1','-framerate',str(request.fps),'-i',str(freeze_file)]
         next_input += 1
-    banner = None
-    if not is_ad and request.banner.enabled and request.banner.start < segment['end'] and request.banner.end > start:
-        banner = asset(request.banner.asset_id,'banner')
-        args += ['-loop','1','-i',str(banner['path'])]
+    banners = []
+    for banner in [request.banner, *request.banners]:
+        if not banner.enabled or (is_ad and banner.timebase == 'source'):
+            continue
+        origin = segment['output_start'] if banner.timebase == 'output' else start
+        a, z = max(0, banner.start-origin), min(duration, banner.end-origin)
+        if z <= a:
+            continue
+        record = asset(banner.asset_id, 'banner')
+        motion = record.get('media_type') == 'video'
+        position = 0
+        if motion:
+            elapsed = banner.offset+max(0, origin-banner.start)
+            if banner.loop:
+                position = elapsed % record['duration']
+            else:
+                if elapsed >= record['duration']:
+                    continue
+                position = elapsed
+                z = min(z, a+record['duration']-position)
+            media_seek = position+max(0,record.get('video_start_time',0)-record.get('container_start_time',0))
+            args += [*(['-stream_loop','-1'] if banner.loop else []),'-ss',f'{media_seek:.6f}',
+                     *banner_decoder_options(record), '-i',str(record['path'])]
+        else:
+            args += ['-loop','1','-framerate',str(request.fps),'-i',str(record['path'])]
+        video_input, audio_input = next_input, None
+        next_input += 1
+        if motion and banner.volume > 0 and record.get('recommended_audio_stream_index') is not None:
+            audio_path = banner_audio_file(job_id, record)
+            audio_input = next_input
+            next_input += 1
+            args += [*(['-stream_loop','-1'] if banner.loop else []),'-ss',f'{position:.6f}','-i',str(audio_path)]
+        banners.append((video_input, banner, a, z, record, audio_input))
     c,bg = request.canvas,request.background
     geometry = request.advertising.geometry or Geometry(x=0,y=0,w=c.width,h=c.height,fit='contain') if is_ad else request.video
     video_label = f'0:{source["video_stream_index"]}'
@@ -834,19 +1179,41 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         filters.append('[mainraw]null[main]')
     filters += [layer_filter('main',geometry,'foreground'),f'[bg][foreground]overlay=x={round(geometry.x)}:y={round(geometry.y)}:shortest=1[composite]']
     last = 'composite'
-    if banner:
-        b = request.banner.geometry
-        a,z = max(0,request.banner.start-start),min(duration,request.banner.end-start)
-        filters += [layer_filter(f'{next_input}:v:0',b,'banner'),f"[composite][banner]overlay=x={round(b.x)}:y={round(b.y)}:enable='gte(t,{a:.6f})*lt(t,{z:.6f})':shortest=1[advert]"]
-        last = 'advert'
+    banner_sounds = []
+    for number, (input_index, banner, a, z, record, audio_input) in enumerate(banners):
+        b, key = banner.geometry, banner.chromakey
+        label, composed = f'banner{number}', f'bannercomposite{number}'
+        raw = f'bannertimed{number}'
+        filters.append(f'[{input_index}:v:0]trim=duration={z-a:.6f},setpts=PTS-STARTPTS+{a:.6f}/TB,'
+                       f'scale=iw*sar:ih,setsar=1[{raw}]')
+        if key.enabled:
+            # colorkey replaces alpha, so multiply its mask by the original
+            # alpha channel before merging. Transparent uploads stay transparent.
+            keyed = f'bannerkey{number}'
+            filters.extend(banner_key_filters(raw,key,keyed,f'bkey{number}'))
+            raw = keyed
+        fitted = f'bannerfitted{number}'
+        x, y = banner_overlay_position(b)
+        filters += [layer_filter(raw,b,fitted), banner_rotation_filter(fitted,b.rotation,label),
+            f"[{last}][{label}]overlay=x={x}:y={y}:enable='gte(t,{a:.6f})*lt(t,{z:.6f})':eof_action=pass:repeatlast=0:shortest=0[{composed}]"]
+        last = composed
+        if audio_input is not None:
+            sound = f'bannersound{number}'
+            filters.append(f'[{audio_input}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+                f'atrim=duration={z-a:.6f},volume={banner.volume:.6f},'
+                f'adelay={round(a*1000)}:all=1,apad=whole_dur={duration:.6f},'
+                f'atrim=duration={duration:.6f}[{sound}]')
+            banner_sounds.append(sound)
     if not is_ad and request.subtitles.enabled and request.subtitles.cues:
         ass_name = name.replace('.mp4','.ass')
         write_ass(directory/ass_name,request,Part.model_construct(start=start,end=segment['end']))
         # Native DirectWrite/fontconfig finds fonts without scanning every Windows .fon.
         filters += [f'[{last}]ass=filename={ass_name}[captioned]']
         last = 'captioned'
-    filters += [f'[{last}]tpad=stop_mode=clone:stop_duration={duration:.6f},fps={request.fps}:start_time=0,'
-                f'trim=duration={duration:.6f},setpts=N/({request.fps}*TB),format=yuv420p[out]']
+    # Pad after conversion to the output frame rate. Padding before fps can lose
+    # the final resampled frames when a seek reaches a lower-fps source's EOF.
+    filters += [f'[{last}]fps={request.fps}:start_time=0,tpad=stop_mode=clone:stop_duration={duration:.6f},'
+                f'trim=duration={duration:.6f},setpts=N/({request.fps}*TB),setsar=1,format=yuv420p[out]']
     delay = 0
     if selected is not None:
         track = next(t for t in source['audio_streams'] if t['index']==selected)
@@ -856,10 +1223,13 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         audio_filter += f',atempo={speed}'
     if delay > .001:
         audio_filter += f',adelay={round(delay*1000)}:all=1'
-    audio_filter += f',apad=whole_dur={duration:.6f},atrim=duration={duration:.6f}[sound]'
+    audio_filter += f',apad=whole_dur={duration:.6f},atrim=duration={duration:.6f}['+('mainsound' if banner_sounds else 'sound')+']'
     filters.append(audio_filter)
+    if banner_sounds:
+        filters.append('[mainsound]'+''.join(f'[{sound}]' for sound in banner_sounds)+
+                       f'amix=inputs={len(banner_sounds)+1}:duration=first:dropout_transition=0:normalize=0[sound]')
     args += ['-filter_complex_threads',str(min(8,os.cpu_count() or 4)),'-filter_complex',';'.join(filters),'-map','[out]','-map','[sound]',
-             '-t',f'{duration:.6f}',*encoding_arguments(encoder,request.quality),
+             '-t',f'{duration:.6f}','-r',str(request.fps),'-fps_mode','cfr',*encoding_arguments(encoder,request.quality),
              '-c:a','aac','-ac','2','-ar','48000','-b:a','192k','-movflags','+faststart',name]
     run_ffmpeg(job_id,args,duration,progress_offset,progress_share,name.replace('.mp4','.log'))
     metadata = output_metadata(directory/name)
@@ -878,16 +1248,21 @@ def validate_render(request):
     audio_index(source,request.audio_stream_index)
     if any(p.end > source['duration']+.05 for p in request.parts):
         raise HTTPException(400,'Конец отрезка выходит за длительность видеодорожки.')
-    if request.banner.enabled:
-        asset(request.banner.asset_id,'banner')
+    if any(cut.end > source['duration']+.05 for cut in request.cuts):
+        raise HTTPException(400,'Удаляемый участок выходит за длительность видеодорожки.')
+    for banner in [request.banner, *request.banners]:
+        if banner.enabled:
+            asset(banner.asset_id,'banner')
+            if banner is not request.banner and banner.timebase == 'source' and banner.end > source['duration']+.05:
+                raise HTTPException(400,'Время баннера выходит за длительность исходного видео.')
     ad = asset(request.advertising.asset_id,'advert') if request.advertising.enabled else None
     if ad:
         audio_index(ad,request.advertising.audio_stream_index)
-        for part in request.parts:
-            try:
-                render_timeline(request,part,ad)
-            except ValueError as error:
-                raise HTTPException(400,str(error)) from error
+    for part in request.parts:
+        try:
+            render_timeline(request,part,ad)
+        except ValueError as error:
+            raise HTTPException(400,str(error)) from error
     if shutil.disk_usage(DATA).free < 32*1024*1024:
         raise HTTPException(400,'Недостаточно свободного места для экспорта.')
     return source,ad
@@ -895,9 +1270,36 @@ def validate_render(request):
 
 def render_timeline(request,part,ad):
     middle = request.advertising.placement=='middle'
-    return timeline(part.start,part.end,ad['duration']/request.advertising.speed if ad else 0,
-                    (part.end-part.start)/2 if middle else request.advertising.start,
-                    False if middle else request.advertising.repeat,request.advertising.interval)
+    return composition_timeline(part.start,part.end,[cut.model_dump() for cut in request.cuts],
+                    ad['duration']/request.advertising.speed if ad else 0, request.advertising.start,
+                    request.advertising.repeat,request.advertising.interval,middle)
+
+
+@app.post('/api/composition/resolve')
+def resolve_composition(request: Render):
+    source, ad = validate_render(request)
+    cues = [cue.model_dump() for cue in request.subtitles.cues]
+    banners = [banner.model_dump() for banner in [request.banner, *request.banners] if banner.enabled]
+    parts = []
+    for part in request.parts:
+        plan = render_timeline(request,part,ad)
+        parts.append({'source_start':part.start, 'source_end':part.end,
+                      'duration':sum(segment['duration'] for segment in plan), 'timeline':plan,
+                      'cues':captions_for_timeline(cues,plan), 'banners':timed_items_for_timeline(banners,plan)})
+    return {'schema_version':2, 'parts':parts}
+
+
+class RemapRequest(Strict):
+    items: list[dict] = Field(default_factory=list, max_length=100000)
+    cuts: list[Part] = Field(default_factory=list, max_length=1000)
+
+
+@app.post('/api/composition/remap')
+def remap_composition(request: RemapRequest):
+    try:
+        return {'items':remap_after_cuts(request.items,[cut.model_dump() for cut in request.cuts])}
+    except (ValueError, TypeError, KeyError) as error:
+        raise HTTPException(400,'Не удалось согласовать интервалы: '+str(error)) from error
 
 
 def render_job(job_id,request):
@@ -989,8 +1391,8 @@ def render(request: Render):
 
 @app.post('/api/sample')
 def sample(request: Render):
-    if len(request.parts)!=1 or request.parts[0].end-request.parts[0].start>30.05:
-        raise HTTPException(400,'Проверочный экспорт: одна исходная часть длительностью до 30 секунд.')
+    if len(request.parts)!=1:
+        raise HTTPException(400,'Проверочный экспорт: выберите ровно один клип или один интервал.')
     validate_render(request)
     return create_job(render_job,request,'sample')
 
@@ -1032,7 +1434,11 @@ def group_words(segments,job_id,duration):
     for segment in segments:
         if cancelled(job_id):
             raise Cancelled()
-        update(job_id,progress=min(96,15+81*segment.end/max(.1,duration)),message=f'Распознано {segment.end:.0f} из {duration:.0f} секунд')
+        device = JOBS.get(job_id, {}).get('asr_device', 'cpu')
+        model_name = JOBS.get(job_id, {}).get('asr_model', '')
+        label = 'NVIDIA' if device == 'cuda' else 'CPU'
+        update(job_id,progress=min(96,15+81*segment.end/max(.1,duration)),
+               message=f'Whisper {model_name} · {label}: распознано {segment.end:.0f} из {duration:.0f} секунд')
         words = list(segment.words or [])
         if not words:
             if segment.end>segment.start and segment.text.strip():
@@ -1055,7 +1461,7 @@ def group_words(segments,job_id,duration):
 
 
 def transcribe_job(job_id,request):
-    from faster_whisper import WhisperModel
+    import clipcanvas_ai as ai
     source = asset(request.source_id,'video')
     selected = audio_index(source,request.audio_stream_index)
     cache = cache_path('asr',source,audio=selected,language=request.language,model=request.model)
@@ -1076,12 +1482,9 @@ def transcribe_job(job_id,request):
         if cancelled(job_id):
             raise Cancelled()
         update(job_id,progress=7,message='Загрузка модели речи; при первом использовании нужен интернет…')
-        model = WhisperModel(request.model,device='cpu',compute_type='int8',cpu_threads=min(8,os.cpu_count() or 4),download_root=str(DATA/'models'))
-        if cancelled(job_id):
-            raise Cancelled()
-        update(job_id,progress=15,message='Распознавание речи…')
-        segments,info = model.transcribe(str(directory/'speech.wav'),language=None if request.language=='auto' else request.language,beam_size=5,vad_filter=True,word_timestamps=True)
-        cues,language = group_words(segments,job_id,source['duration']),info.language
+        cues,language = recognize(directory/'speech.wav', request.model, request.language,
+            lambda segments: group_words(segments,job_id,source['duration']), DATA/'models',
+            lambda **values: update(job_id, **values), ai.load_config()['speech_device'])
         atomic_json(cache,{'cues':cues,'language':language,'origin':'asr','audio_stream_index':selected})
         (directory/'speech.wav').unlink(missing_ok=True)
     write_srt(DATA/'jobs'/job_id/'subtitles.srt',cues)
@@ -1158,7 +1561,7 @@ async def import_subtitles(source_id: str | None = None,file: UploadFile = File(
 
 
 def job_summary(job):
-    keys = ('id','type','status','progress','message','error','created_at','updated_at','files')
+    keys = ('id','type','status','progress','message','error','created_at','updated_at','files','automatic_stage')
     result = {k:v for k,v in job.items() if k in keys}
     result['files'] = [f for f in job.get('files',[]) if not f.get('internal')]
     result['retryable'] = bool(job.get('request'))
@@ -1305,6 +1708,12 @@ def delete_asset(asset_id: str):
         for project in list_projects()['projects']:
             if asset_id in json.dumps(project):
                 raise HTTPException(409,'Файл используется сохранённым проектом. Сначала удалите проект.')
+        for path in (DATA/'banner-templates').glob('*.json'):
+            try:
+                if json.loads(path.read_text('utf-8')).get('asset_id') == asset_id:
+                    raise HTTPException(409,'Баннер используется шаблоном. Сначала удалите шаблон из библиотеки.')
+            except (OSError, ValueError):
+                continue
         folder = (DATA/'uploads'/identifier(asset_id)).resolve()
         if folder.parent != (DATA/'uploads').resolve():
             raise HTTPException(400,'Некорректный путь.')
@@ -1358,10 +1767,15 @@ register_url_routes(app,{'DATA':DATA,'create_job':create_job,'update':update,'ca
     'terminate_process':terminate_process,'register_job_type':register_job_type})
 from clipcanvas_studio import register_studio_routes
 studio = register_studio_routes(app, {name: globals()[name] for name in (
-    'ROOT','DATA','create_job','update','cancelled','Cancelled','LOCK','PROCESSES',
+    'ROOT','DATA','create_job','update','cancelled','Cancelled','LOCK','PROCESSES','JOBS',
     'asset','audio_index','cache_path','cached_result','run_ffmpeg','file_record','atomic_json',
-    'extract_job','Extract','get_job','group_words','Render','Geometry','validate_render','probe',
+    'extract_job','Extract','get_job','group_words','Render','Geometry','validate_render','render_timeline','probe',
     'identifier','register_job_type')})
+from clipcanvas_automatic import register_automatic_routes
+automatic = register_automatic_routes(app, {name: globals()[name] for name in (
+    'DATA','Render','Banner','Transcribe','transcribe_job','validate_render','asset','audio_index',
+    'create_job','update','cancelled','Cancelled','get_job','register_job_type','identifier','atomic_json','LOCK',
+    'write_srt','file_record')}, studio)
 app.mount('/',StaticFiles(directory=str(ROOT/'web'),html=True),name='web')
 
 

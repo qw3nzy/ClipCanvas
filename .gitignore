@@ -24,3 +24,6 @@ access-token*.txt
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local reports and preview artifacts
+/output/

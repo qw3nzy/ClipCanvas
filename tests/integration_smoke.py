@@ -136,6 +136,7 @@ def main():
     environment = dict(os.environ)
     environment.update(CLIPCANVAS_DATA=str(data), CLIPCANVAS_HOST='127.0.0.1',
                        CLIPCANVAS_PORT=str(port), PYTHONPATH=str(ROOT / '.runtime' / 'deps'),
+                       CLIPCANVAS_AI_CONFIG_FILE=str(directory / 'ai-config.json'),
                        PYTHONDONTWRITEBYTECODE='1')
     environment.pop('CLIPCANVAS_TOKEN', None)
     log = (directory / 'server.log').open('wb')

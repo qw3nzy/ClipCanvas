@@ -11,7 +11,10 @@ const assert = require('node:assert/strict');
   const browser = await chromium.launch({headless: true, executablePath: process.env.CLIPCANVAS_CHROMIUM});
   const page = await browser.newPage({viewport: {width: 1536, height: 1100}});
   const errors = [];
+  let historyAiChecked = false;
   page.on('pageerror', error => errors.push(error.message));
+  const route = key => page.locator('[data-route="'+key+'"]').click();
+  const tool = async (section, id) => { await route(section); const details = page.locator('details:has(> #'+id+')'); if (await details.getAttribute('open') === null) await details.locator('summary').first().click(); };
   const set = async (id, value) => { await page.locator('#'+id).fill(String(value)); await page.locator('#'+id).dispatchEvent('change'); };
   const idle = () => page.waitForFunction(() => !state.activeJob && !state.importBusy, null, {timeout: 180000});
   const runJob = async (id, endpoint) => {
@@ -28,10 +31,12 @@ const assert = require('node:assert/strict');
   };
   try {
     await page.goto(manifest.base);
-    await page.waitForFunction(() => window.ClipStudio && connected);
+    await page.waitForFunction(() => window.ClipStudio && window.ClipEditor && connected);
+    await route('projects');
     await page.locator('#assetSelect').selectOption(manifest.source_id);
     await page.locator('#openAsset').click();
     await page.waitForFunction(() => state.sourceId && state.duration > 0 && !busy());
+    await route('edit');
     await runJob('buildTimeline', '/api/studio/overview');
     await page.waitForFunction(() => document.getElementById('timelineHint').textContent.includes('Смен сцен'));
     await runJob('extractSubtitles', '/api/subtitles/extract');
@@ -59,13 +64,13 @@ const assert = require('node:assert/strict');
     assert.ok(Math.abs(await page.evaluate(() => state.ranges[0].end)-6.5) < .12);
     await page.locator('#timelineZoomIn').click(); assert.equal(await page.locator('#timelineZoomValue').textContent(), '2×');
     await page.locator('#timelineFit').click();
-    await page.locator('#studioTabtemplates').click();
+    await tool('design', 'studioPaneltemplates');
     await page.locator('#templateList .template-card').nth(1).getByRole('button', {name: 'Применить', exact: true}).click();
     assert.equal(await page.evaluate(() => state.subtitles.style), 'word');
     assert.equal(await page.evaluate(() => state.subtitles.cues.length), 2);
     await set('templateName', 'Browser smoke style'); await page.locator('#saveTemplate').click();
     await page.waitForFunction(() => document.getElementById('templateList').textContent.includes('Browser smoke style'));
-    await page.locator('#subtitlesTab').click();
+    await route('subtitles');
     await page.locator('#formatCaptions').click();
     await page.waitForFunction(() => document.getElementById('captionReviewDialog').open);
     await page.locator('#applyCaptionReview').click();
@@ -74,13 +79,13 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => document.querySelectorAll('.subtitle-match').length === 1);
     await page.locator('.subtitle-match').click();
     assert.ok(Math.abs(await page.evaluate(() => video.currentTime)-.5) < .1);
-    await page.locator('#studioTabchecks').click(); await page.locator('#runPreflight').click();
+    await tool('export', 'studioPanelchecks'); await page.locator('#runPreflight').click();
     await page.waitForFunction(() => document.getElementById('checkResults').textContent.length > 0);
     const evidencePath = path.join(manifest.directory, 'studio-result.json');
     if (fs.existsSync(evidencePath)) {
       const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
       if (evidence.ai_job_id) {
-        await page.locator('.history-details > summary').click();
+        await route('export');
         await page.locator('#refreshHistory').click();
         const row = page.locator('#jobList .history-item').filter({hasText: 'Поиск сцен · '+evidence.ai_job_id.slice(0, 8)});
         await row.getByRole('button', {name: 'Открыть результат', exact: true}).click();
@@ -93,13 +98,14 @@ const assert = require('node:assert/strict');
         assert.equal(await page.evaluate(() => state.ranges.length), 2);
         await page.locator('#undoEdit').click();
         assert.equal(await page.evaluate(() => state.ranges.length), 1);
-        await page.locator('.history-details > summary').click();
+        await route('edit');
+        historyAiChecked = true;
       }
     }
     await page.locator('#saveProject').click();
     await page.waitForFunction(() => document.getElementById('autosaveState').textContent === 'Проект сохранён');
-    await page.locator('#studioTabfind').click();
-    await page.evaluate(() => { document.querySelector('.settings-panel').scrollTop = 0; document.getElementById('toast').hidden = true; });
+    await tool('edit', 'studioPanelfind');
+    await page.evaluate(() => { document.querySelector('.media-panel').scrollTop = 0; document.getElementById('toast').hidden = true; });
     await page.screenshot({path: path.join(output, 'studio-desktop.png'), fullPage: true});
     for (const width of [736, 320]) {
       await page.setViewportSize({width, height: 1000});
@@ -112,7 +118,7 @@ const assert = require('node:assert/strict');
     assert.ok(Math.abs(await page.evaluate(() => state.ranges[0].end)-6.5) < .12);
     await page.waitForFunction(() => document.getElementById('timelineHint').textContent.includes('Смен сцен'));
     assert.deepEqual(errors, []);
-    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({passed: ['timeline I/O, precision trim, drag, undo/redo, zoom', 'cached film overview restored', 'templates retain captions and clips', 'caption review and text search', 'AI cards from history, evidence, playback and insertion', 'preflight, project restore, 736/320px layouts', 'no browser errors']}, null, 2));
+    fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({passed: ['timeline I/O, precision trim, drag, undo/redo, zoom', 'cached film overview restored', 'templates retain captions and clips', 'caption review and text search', ...(historyAiChecked ? ['AI cards from history, evidence, playback and insertion'] : []), 'preflight, project restore, 736/320px layouts', 'no browser errors'], skipped: historyAiChecked ? [] : ['AI cards: no saved QA AI job in studio-result.json']}, null, 2));
     console.log('Studio UI passed: '+output);
   } catch (error) {
     await page.screenshot({path: path.join(output, 'failure.png'), fullPage: true}).catch(() => {});

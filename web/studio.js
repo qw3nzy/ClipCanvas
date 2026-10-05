@@ -70,6 +70,7 @@
     <p class="muted">Чёрный экран и тишина могут быть частью фильма. Проверка отмечает их для просмотра.</p>`;
 
   function openTab(key) {
+    window.ClipEditor?.studioTabOpened(key);
     mediaPanel.scrollTop = 0;
     for (const [name] of tabs) {
       panels[name].hidden = name !== key;
@@ -154,7 +155,7 @@
     return JSON.stringify(cues.map(c => [c.start, c.end, c.text, (c.words || []).map(w => [w.start, w.end, w.text])]));
   }
   function snapshot() {
-    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean'];
+    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean', 'banners', 'cuts', 'editor'];
     return JSON.stringify(Object.fromEntries(keys.map(key => [key, state[key]])));
   }
   function recordUndo() {
@@ -178,7 +179,7 @@
     lastSnapshot = from.pop();
     applyingUndo = true;
     Object.assign(state, JSON.parse(lastSnapshot));
-    sourcePreview(); syncControls(); renderParts(); renderSubtitles(); resizeStage(); changed();
+    sourcePreview(); syncControls(); renderParts(); renderSubtitles(); resizeStage(); window.ClipEditor?.sync(); changed();
     applyingUndo = false;
     $('undoEdit').disabled = !undoStack.length;
     $('redoEdit').disabled = !redoStack.length;
@@ -258,17 +259,18 @@
     }
     trackCanvas.style.width = width+'px';
     paint.setTransform(ratio, 0, 0, ratio, 0, 0);
-    paint.fillStyle = '#f8fafc'; paint.fillRect(0, 0, width, trackHeight);
+    const dark = document.documentElement.dataset.theme === 'dark';
+    paint.fillStyle = dark ? '#182233' : '#f8fafc'; paint.fillRect(0, 0, width, trackHeight);
     const pps = pxPerSecond(), left = scroll.scrollLeft, x = sec => sec*pps-left;
     const visibleStart = left/pps, visibleEnd = (left+width)/pps;
     const target = 85/pps;
     const step = [1/30, .1, .25, .5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600].find(v => v >= target) || 7200;
     paint.font = '11px Segoe UI'; paint.textBaseline = 'middle';
     for (let t = Math.ceil(visibleStart/step)*step; t <= Math.min(state.duration, visibleEnd); t += step) {
-      paint.fillStyle = '#cdd6e4'; paint.fillRect(x(t), 22, 1, trackHeight-22);
-      paint.fillStyle = '#617087'; paint.fillText(step < 1 ? t.toFixed(2) : shortTime(t), x(t)+5, 12);
+      paint.fillStyle = dark ? '#394b64' : '#cdd6e4'; paint.fillRect(x(t), 22, 1, trackHeight-22);
+      paint.fillStyle = dark ? '#bac9dc' : '#617087'; paint.fillText(step < 1 ? t.toFixed(2) : shortTime(t), x(t)+5, 12);
     }
-    paint.fillStyle = '#e3eaf3'; paint.fillRect(0, 30, width, 52);
+    paint.fillStyle = dark ? '#25364d' : '#e3eaf3'; paint.fillRect(0, 30, width, 52);
     if (!state.duration) {
       paint.fillStyle = '#7b8ca6'; paint.fillText('Здесь появятся кадры, звук, клипы и субтитры', 18, 57); return;
     }
@@ -293,9 +295,9 @@
       const part = cachedParts[i];
       if (part.end < visibleStart || part.start > visibleEnd) continue;
       const startX = Math.max(-2, x(part.start)), endX = Math.min(width+2, x(part.end)), active = i === selected;
-      paint.fillStyle = active ? '#2563eb' : '#dce8fc'; paint.fillRect(startX, 129, Math.max(2, endX-startX-2), 34);
+      paint.fillStyle = active ? '#2563eb' : (dark ? '#294772' : '#dce8fc'); paint.fillRect(startX, 129, Math.max(2, endX-startX-2), 34);
       paint.strokeStyle = active ? '#194ebf' : '#aac5f5'; paint.strokeRect(startX+.5, 129.5, Math.max(1, endX-startX-3), 33);
-      paint.fillStyle = active ? '#ffffff' : '#335783';
+      paint.fillStyle = active ? '#ffffff' : (dark ? '#d0e2fc' : '#335783');
       if (endX-startX > 28) paint.fillText(''+(i+1), startX+10, 146);
       if (active) { paint.fillRect(x(part.start)+3, 138, 2, 16); paint.fillRect(x(part.end)-7, 138, 2, 16); }
       if (state.advertising.enabled && !state.exportClean && advertAsset) {
@@ -311,14 +313,15 @@
     while (lo < hi) { const mid = (lo+hi)>>1; if (cues[mid].end < visibleStart) lo = mid+1; else hi = mid; }
     for (let i = lo; i < cues.length && cues[i].start <= visibleEnd; i++) {
       const a = Math.max(0, x(cues[i].start)), b = Math.min(width, x(cues[i].end));
-      paint.fillStyle = '#e8def9'; paint.fillRect(a, 175, Math.max(2, b-a-1), 26);
-      if (b-a > 45) { paint.save(); paint.beginPath(); paint.rect(a+3, 175, b-a-6, 26); paint.clip(); paint.fillStyle = '#6a4894'; paint.fillText(cues[i].text.replaceAll('\n', ' '), a+6, 188); paint.restore(); }
+      paint.fillStyle = dark ? '#483c60' : '#e8def9'; paint.fillRect(a, 175, Math.max(2, b-a-1), 26);
+      if (b-a > 45) { paint.save(); paint.beginPath(); paint.rect(a+3, 175, b-a-6, 26); paint.clip(); paint.fillStyle = dark ? '#ebd5ff' : '#6a4894'; paint.fillText(cues[i].text.replaceAll('\n', ' '), a+6, 188); paint.restore(); }
     }
     if (markOut > markIn) { paint.fillStyle = '#2563eb13'; paint.fillRect(x(markIn), 26, (markOut-markIn)*pps, trackHeight-26); }
     for (const [t, label] of [[markIn, 'I'], [markOut, 'O']]) {
       const tx = x(t); if (tx < -20 || tx > width+20) continue;
       paint.fillStyle = '#2563eb'; paint.fillRect(tx, 23, 1, 183); paint.fillRect(tx-6, 21, 13, 15); paint.fillStyle = '#fff'; paint.fillText(label, tx-2, 29);
     }
+    for (const cut of state.cuts || []) { paint.fillStyle = dark ? '#f46c6955' : '#db373740'; paint.fillRect(x(cut.start), 30, Math.max(2, (cut.end-cut.start)*pps), 172); }
     const cursor = x(video.currentTime || 0);
     paint.fillStyle = '#ef685e'; paint.fillRect(cursor, 0, 2, trackHeight);
     paint.beginPath(); paint.moveTo(cursor-5, 0); paint.lineTo(cursor+7, 0); paint.lineTo(cursor+1, 9); paint.fill();
@@ -450,7 +453,8 @@
   async function checkAI(start = false) {
     const result = start ? await post('/api/ai/start', {}) : await api('/api/ai/status');
     aiAvailable = result.available;
-    $('aiStatus').textContent = result.available ? 'Qwen3.5‑4B · готов' : result.running ? 'Модель не скачана · Setup-AI.cmd' : result.installed ? 'Ollama установлен · нажмите «Запустить»' : 'Установите модель · Setup-AI.cmd';
+    const execution=result.execution||{},device=execution.state==='loaded'?(execution.device==='cuda'?' · NVIDIA':' · CPU'):' · загрузится при анализе';
+    $('aiStatus').textContent = result.available ? (result.model||'Модель')+' · готова'+device : result.running ? result.error||'Выбранная модель не установлена · Настройки' : result.installed ? 'Ollama установлен · нажмите «Запустить»' : 'Установите модель · Setup-AI.cmd';
     $('refreshAI').textContent = result.running ? 'Проверить' : 'Запустить';
     $('refreshAI').dataset.start = String(!result.running);
     $('aiStatus').classList.toggle('ready', result.available);
@@ -552,6 +556,7 @@
         if (settings.width && settings.height) setCanvas(settings.width, settings.height);
         for (const key of ['background', 'geometry']) if (settings[key]) Object.assign(state[key], structuredClone(settings[key]));
         if (!settings.geometry) autoVideo();
+        if (settings.banner_layout) (state.banners || []).forEach((banner, i) => { if (settings.banner_layout[i]) banner.geometry = structuredClone(settings.banner_layout[i]); });
         if (settings.subtitles) Object.assign(state.subtitles, structuredClone(settings.subtitles));
         for (const key of ['quality', 'encoder', 'fps']) if (settings[key] !== undefined) state[key] = settings[key];
         syncControls(); resizeStage(); changed(); toast('Применён шаблон «'+template.name+'».');
@@ -562,7 +567,7 @@
   }
   $('saveTemplate').onclick = handle(async () => {
     const name = $('templateName').value.trim(); if (!name) throw Error('Введите название шаблона.');
-    const settings = {width: state.width, height: state.height, geometry: state.geometry, background: state.background,
+    const settings = {width: state.width, height: state.height, geometry: state.geometry, background: state.background, banner_layout: (state.banners || []).map(b => b.geometry),
       subtitles: Object.fromEntries(Object.entries(state.subtitles).filter(([key]) => !['cues', 'enabled'].includes(key))),
       quality: state.quality, encoder: state.encoder, fps: state.fps};
     await post('/api/templates', {name, settings}); $('templateName').value = ''; await loadTemplates(); toast('Шаблон сохранён.');
@@ -668,9 +673,9 @@
     clearTimeout(undoTimer); if (!applyingUndo) undoTimer = setTimeout(recordUndo, 350);
     restoreStudio();
   }
-  window.ClipStudio = {changed: onChange, refreshButtons: refreshStudioButtons, applyJobResult: applyStudioJob,
+  window.ClipStudio = {changed: onChange, refreshButtons: refreshStudioButtons, applyJobResult: applyStudioJob, refreshAI:checkAI,
     connected() { checkAI().catch(error => { $('aiStatus').textContent = error.message; }); restoreStudio(); },
-    openTab, addParts, selectClip, refreshTimelineData, projectRestored() {
+    checkpoint, undo, openTab, addParts, selectClip, refreshTimelineData, projectRestored() {
       clearTimeout(undoTimer); undoStack = []; redoStack = []; lastSnapshot = snapshot(); restoreKey = '';
       overview = null; images = new Map(); selected = -1; selectClip(-1); onChange();
     }};

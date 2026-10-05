@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'.runtime/deps'))
 sys.path.insert(0, str(ROOT/'engine'))
 from clipcanvas_studio import (Search, CaptionReview, validated_clips, distinct_clips, windows,
-    formatted_cues, corrected_cue, template_settings, reading_issues, anchors_for)
+    formatted_cues, corrected_cue, template_settings, reading_issues, anchors_for, BoundaryAnalysis, Studio)
 
 
 class HighlightTests(unittest.TestCase):
@@ -51,6 +51,15 @@ class HighlightTests(unittest.TestCase):
 
 
 class CaptionReviewTests(unittest.TestCase):
+    def test_style_preserved_and_measured_lines_invalidated_after_review(self):
+        cue = dict(start=0, end=2, text='привет мир', appearance={'x': 30, 'font': 'Arial'}, render_lines=['привет мир'])
+        corrected = corrected_cue(cue, 'Привет, мир!')
+        self.assertEqual(corrected['appearance'], cue['appearance'])
+        self.assertNotIn('render_lines', corrected)
+        formatted = formatted_cues([cue], 16)[0]
+        self.assertEqual(formatted['appearance'], cue['appearance'])
+        self.assertNotIn('render_lines', formatted)
+
     def test_formatting_does_not_invent_word_times(self):
         cue = dict(start=4, end=8, text='Одна довольно длинная фраза без точных меток слов.', words=[])
         result = formatted_cues([cue], 16)
@@ -78,12 +87,83 @@ class CaptionReviewTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    def test_banner_layout_never_carries_materials_or_timestamps(self):
+        result = template_settings({'banner_layout': [{'x': 10, 'y': 20, 'w': 80, 'h': 40,
+            'asset_id': 'private', 'start': 12, 'end': 25, 'name': 'private-name'}]})
+        self.assertEqual(result, {'banner_layout': [{'x': 10, 'y': 20, 'w': 80, 'h': 40}]})
+
+    def test_extended_style_survives_template_without_private_cues(self):
+        result = template_settings({'subtitles': {'font': 'Arial', 'bold': False, 'x': 25, 'width': 70,
+            'background_opacity': .3, 'line_spacing': 1.5, 'cues': [{'text': 'private'}]}})
+        self.assertEqual(result['subtitles']['background_opacity'], .3)
+        self.assertEqual(result['subtitles']['width'], 70)
+        self.assertNotIn('cues', result['subtitles'])
+
     def test_template_cannot_copy_user_content_or_asset_ids(self):
         value = {'sourceId': 'secret', 'ranges': [1], 'subtitles': {'cues': [{'text': 'private'}], 'enabled': True, 'size': 52},
                  'activeJob': 'job', 'geometry': {'video': {'w': 1080}, 'source_id': 'secret'}}
         result = template_settings(value)
         self.assertEqual(result, {'subtitles': {'size': 52}, 'geometry': {'video': {'w': 1080}}})
         self.assertIn('cues', value['subtitles'])
+
+
+class BoundaryJobTests(unittest.TestCase):
+    def test_edge_transcription_is_marked_partial_but_full_track_is_reused(self):
+        import tempfile
+        import threading
+        for full in (False, True):
+            with self.subTest(full=full), tempfile.TemporaryDirectory(dir=ROOT/'.runtime/qa') as temporary:
+                data = Path(temporary)
+                (data/'jobs'/'job').mkdir(parents=True)
+                updates = []
+                context = {'DATA': data, 'LOCK': threading.Lock(), 'PROCESSES': {},
+                           'asset': lambda *_: {'duration': 600}, 'audio_index': lambda *_: None,
+                           'cache_path': lambda kind, *_args, **_kwargs: data/(kind+'.json'),
+                           'cached_result': lambda _: None, 'atomic_json': lambda *_: None,
+                           'cancelled': lambda _: False, 'update': lambda _, **value: updates.append(value)}
+                def transcript(_job, request, _source, end):
+                    return [{'start': 0, 'end': 590, 'text': 'Полная дорожка'}] if full else [
+                        {'start': request.start, 'end': end, 'text': 'Край'}]
+                with patch('clipcanvas_studio.ai.cache_identity', return_value={}), \
+                     patch('clipcanvas_studio.ai.model_name', return_value='qa'), \
+                     patch('clipcanvas_studio.ai.analyze_boundaries', return_value=[]), \
+                     patch('clipcanvas_studio.ai.unload'), \
+                     patch.object(Studio, 'transcript', side_effect=transcript) as preparation:
+                    Studio(context).boundaries_job('job', BoundaryAnalysis(source_id='source'))
+                self.assertEqual(updates[-1]['transcript_partial'], not full)
+                self.assertEqual(preparation.call_count, 1 if full else 2)
+
+    def test_analysis_returns_proposals_without_mutating_source_cues(self):
+        import tempfile
+        import threading
+        from copy import deepcopy
+        with tempfile.TemporaryDirectory(dir=ROOT/'.runtime/qa') as temporary:
+            data = Path(temporary)
+            (data/'jobs'/'job').mkdir(parents=True)
+            updates = []
+            context = {'DATA': data, 'LOCK': threading.Lock(), 'PROCESSES': {},
+                       'asset': lambda *_: {'duration': 60}, 'audio_index': lambda *_: None,
+                       'cache_path': lambda kind, *_args, **_kwargs: data/(kind+'.json'),
+                       'cached_result': lambda _path: None, 'atomic_json': lambda *_: None,
+                       'cancelled': lambda _: False, 'update': lambda _id, **value: updates.append(value)}
+            request = BoundaryAnalysis(source_id='video', cues=[{'start': 0, 'end': 5, 'text': 'Приветствие'},
+                                                               {'start': 5, 'end': 55, 'text': 'Содержание'}])
+            original = deepcopy(request.model_dump())
+            proposal = {'type': 'intro', 'start': 0, 'end': 5, 'reason': 'Приветствие', 'confidence': .85}
+            with patch('clipcanvas_studio.ai.cache_identity', return_value={'model': 'qa'}), \
+                 patch('clipcanvas_studio.ai.model_name', return_value='qa'), \
+                 patch('clipcanvas_studio.ai.analyze_boundaries', return_value=[proposal]) as analyze, \
+                 patch('clipcanvas_studio.ai.unload'):
+                Studio(context).boundaries_job('job', request)
+            self.assertEqual(request.model_dump(), original)
+            self.assertEqual(updates[-1]['boundaries'][0]['kind'], 'intro')
+            self.assertEqual(updates[-1]['boundaries'][0]['end'], 5)
+            self.assertEqual(analyze.call_args.args[1], 60)
+            self.assertNotIn('cuts', updates[-1])
+
+    def test_invalid_window_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BoundaryAnalysis(source_id='x', window_seconds=10000)
 
 
 class PersistenceTests(unittest.TestCase):

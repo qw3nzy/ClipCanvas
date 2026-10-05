@@ -1,0 +1,33 @@
+/* Common editing actions stay above advanced settings. */
+.preview-scope{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap;max-width:100%}
+.preview-scope select{width:auto;max-width:100%;min-height:34px;padding:5px 8px}
+.preview-panel .panel-heading{flex-wrap:wrap;gap:10px}
+.preview-panel:fullscreen{max-width:none!important;max-height:none!important;box-sizing:border-box;overflow:hidden}
+.preview-panel:fullscreen .preview-scope{color:#e8eef8}
+.preview-panel:fullscreen .preview-area{padding:0;min-height:0}
+.banner-tools{border-top:0;margin-top:0;padding-top:0}
+.banner-library{border:1px solid var(--line);border-radius:12px;background:var(--surface-alt);padding:12px;margin:12px 0 18px}
+.banner-library h3{margin:0}.banner-library p{font-size:12px;line-height:1.55}
+.banner-template-list{display:grid;gap:10px;max-height:360px;overflow:auto}
+.banner-template-card{display:grid;grid-template-columns:64px minmax(0,1fr);align-items:center;gap:10px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);cursor:grab}
+.banner-template-card img{width:64px;height:44px;object-fit:contain;background:var(--field);border-radius:4px}
+.banner-template-card strong{font-size:12px;overflow-wrap:anywhere}
+.banner-template-card .action-pair{grid-column:1/-1;justify-content:flex-start}.banner-template-card .button{padding:7px 12px}
+.banner-template-card .text-button{font-size:11px}.banner-drop-target{outline:3px dashed var(--accent);outline-offset:5px}
+.banner-rotation{padding:12px 0}.banner-rotation .action-pair{flex-wrap:wrap}.banner-rotation .range-field{margin-top:8px}
+.selection{transform-origin:center center}.selection .rotation-handle{position:absolute;left:calc(50% - 14px);top:-40px;width:28px;height:28px;border:2px solid #fff;background:#245bd3;color:#fff;border-radius:50%;padding:0;font-size:19px;line-height:22px;cursor:grab;touch-action:none}
+.rotation-handle::after{content:'';position:absolute;top:26px;left:11px;width:2px;height:12px;background:#fff}
+#saveBannerTemplate{width:100%;margin:8px 0 12px}
+.automatic-tool{padding:18px;border:1px solid var(--accent);border-radius:12px;background:var(--accent-soft);margin-bottom:20px}
+.automatic-heading{display:flex;align-items:flex-start;gap:10px}.automatic-heading h2{margin:0;font-size:19px}.automatic-heading p{font-size:12px;margin:5px 0 12px}
+.automatic-icon{font-size:28px;color:var(--accent)}.automatic-tool .toggle-row{gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.automatic-tool>p{font-size:12px;line-height:1.55}.automatic-tool>.primary{margin-top:10px}
+.automatic-report{padding-left:19px;font-size:12px;line-height:1.6}.automatic-report:empty{display:none}.automatic-report li{margin:8px 0}.automatic-report .applied{color:var(--good)}
+.editor-pane>details>summary{padding:8px 0}.editor-pane .settings-details[open]>summary{margin-bottom:12px}
+.editor-pane>details #layoutSettings{padding-top:8px}.editor-pane>.banner-tools+.layers-title{margin-top:20px}
+@media(max-width:750px){.preview-scope{font-size:11px}.preview-scope select{font-size:12px}.automatic-tool{padding:13px}.editor-navigation{gap:6px}.editor-nav-button{flex:1 0 29%;font-size:11px;padding:9px 6px}.preview-panel:fullscreen .panel-heading{padding:8px 12px}.preview-panel:fullscreen .panel-heading h2{display:none}}
+@media(max-width:420px){.preview-panel .panel-heading{padding:12px}.preview-scope{width:100%;justify-content:space-between}.preview-scope select{flex:1;min-width:0}.banner-template-card .action-pair{flex-wrap:wrap}.automatic-heading h2{font-size:17px}}
+
+.preview-panel:fullscreen h2{color:#e8eef8}.banner-library summary{font-weight:600;color:var(--accent);cursor:pointer}.banner-library[open]>summary{margin-bottom:10px}
+
+.banner-media-badge{grid-column:2;color:var(--accent)}

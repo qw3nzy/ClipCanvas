@@ -76,7 +76,7 @@ def normalize_cues(cues: list[dict], duration: float | None = None) -> list[dict
             a, b = max(start, float(word['start'])), min(end, float(word['end']))
             if math.isfinite(a) and math.isfinite(b) and b > a:
                 words.append({'start': a, 'end': b, 'text': str(word.get('text', word.get('word', ''))), **({'probability': word['probability']} if word.get('probability') is not None else {})})
-        clean.append({'start': start, 'end': end, 'text': value, 'words': words,
+        clean.append({**cue, 'start': start, 'end': end, 'text': value, 'words': words,
                       'timing_quality': cue.get('timing_quality', 'word' if words else 'phrase')})
     if not clean:
         return []
@@ -94,9 +94,11 @@ def normalize_cues(cues: list[dict], duration: float | None = None) -> list[dict
             words = selected[0]['words'] if len(selected) == 1 else []
             words = [{**w, 'start': max(previous, w['start']), 'end': min(moment, w['end'])}
                      for w in words if w['end'] > previous and w['start'] < moment]
-            item = {'start': previous, 'end': moment, 'text': value, 'words': words,
+            item = {**selected[0], 'start': previous, 'end': moment, 'text': value, 'words': words,
                     'timing_quality': selected[0]['timing_quality'] if len(selected) == 1 else 'phrase'}
-            if result and result[-1]['text'] == value and not result[-1]['words'] and not words and abs(result[-1]['end']-previous) < 1e-6:
+            if len(selected) > 1:
+                item.pop('render_lines', None)
+            if result and result[-1]['text'] == value and result[-1].get('appearance') == item.get('appearance') and result[-1].get('render_lines') == item.get('render_lines') and not result[-1]['words'] and not words and abs(result[-1]['end']-previous) < 1e-6:
                 result[-1]['end'] = moment
             else:
                 result.append(item)

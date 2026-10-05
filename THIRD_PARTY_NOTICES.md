@@ -22,7 +22,9 @@ runtime. It does not install or run the Yoinks terminal interface.
 URL extraction and downloading use [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 JavaScript challenges, where supported, use the bundled yt-dlp-ejs and Deno
 dependencies. ClipCanvas does not automatically import browser cookies or
-account credentials. Site availability depends on the site and the installed
+account credentials. Users may explicitly import a Netscape cookie file for
+YouTube; other domains are discarded, and Windows stores the session with DPAPI.
+Site availability depends on the site and the installed
 extractor version; support for every URL is not guaranteed.
 
 Video processing uses FFmpeg via imageio-ffmpeg; subtitle recognition uses

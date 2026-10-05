@@ -8,13 +8,14 @@ import subprocess
 import urllib.request
 import zipfile
 
-from clipcanvas_ai import ROOT, MODEL, ADDRESS, ensure_server
+from clipcanvas_ai import ROOT, RECOMMENDED_MODEL, ADDRESS, ensure_server, load_config, save_config
 
 VERSION = 'v0.35.1'
 SHA256 = 'dc50b9ca7f9023c86525012632cd1615b093d0407987444a7f62ecab617e8e93'
 
 
 def install():
+    model = os.environ.get('CLIPCANVAS_AI_INSTALL_MODEL', RECOMMENDED_MODEL)
     runtime = ROOT/'.runtime'
     runtime.mkdir(exist_ok=True)
     archive = runtime/'ollama-package.zip'
@@ -35,10 +36,13 @@ def install():
                 if not (destination/entry.filename).resolve().is_relative_to(destination.resolve()):
                     raise RuntimeError('Unsafe archive path')
             package.extractall(destination)
-    ensure_server()
-    print('Downloading '+MODEL+' (about 3.4 GB)…', flush=True)
-    subprocess.run([str(executable), 'pull', MODEL], env={**os.environ, 'OLLAMA_HOST': ADDRESS,
+    config = load_config(private=True)
+    ensure_server({**config, 'provider': 'ollama', 'base_url': ADDRESS, 'local': True})
+    print('Downloading '+model+' (9B: about 6.6 GB; 4B: about 3.4 GB)…', flush=True)
+    subprocess.run([str(executable), 'pull', model], env={**os.environ, 'OLLAMA_HOST': ADDRESS,
         'OLLAMA_MODELS': str(ROOT/'data/models/ollama'), 'OLLAMA_NO_CLOUD': '1'}, check=True)
+    if config['provider'] == 'ollama':
+        save_config({'model': model})
     print('Local AI ready.', flush=True)
 
 

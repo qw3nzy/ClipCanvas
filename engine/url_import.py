@@ -20,11 +20,20 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field
+from youtube_session import (MAX_COOKIE_BYTES, cookie_arguments, save_session,
+                             session_path, without_auth_metadata)
 
 YOINKS_COMMIT = '6f03720813c22f907d3fb9ba98567f2169446b82'
 MAX_INFO_BYTES = 24 * 1024 * 1024
+
+
+class DownloaderError(RuntimeError):
+    def __init__(self, detail, reason='other'):
+        super().__init__('Не удалось получить видео. ' + detail)
+        self.detail = detail
+        self.reason = reason
 
 
 class InspectLink(BaseModel):
@@ -118,25 +127,63 @@ def _runtime_arguments():
     return ['--js-runtimes', 'node:' + node] if node else []
 
 
-def _safe_error(log_path):
+def _download_error(log_path):
     try:
         with log_path.open('rb') as stream:
-            stream.seek(max(0, log_path.stat().st_size - 5000))
+            stream.seek(max(0, log_path.stat().st_size - 8000))
             lines = stream.read().decode('utf-8', errors='replace').splitlines()
         errors = [line for line in lines if 'ERROR:' in line]
         detail = (errors[-1] if errors else '\n'.join(lines[-3:]))[-1200:]
-        lowered = detail.lower()
-        if '403' in lowered or 'cloudflare' in lowered:
-            return 'Сайт отклонил автоматическую загрузку. Можно загрузить имеющийся у вас видеофайл с компьютера.'
+        lowered = '\n'.join(lines).lower()
+        if 'not a bot' in lowered or 'captcha' in lowered:
+            return DownloaderError('YouTube требует подтверждения «не робот» для подключения ПК с движком. '
+                'Откройте «Видео по ссылке → Подключение YouTube» и подключите cookies после входа на сайт. '
+                'Частые повторы могут продлить ограничение.', 'bot_verification')
         if '429' in lowered or 'too many requests' in lowered:
-            return 'Сайт временно ограничил число запросов. Попробуйте позднее.'
+            return DownloaderError('Сайт ограничил запросы с подключения ПК с движком (HTTP 429). '
+                'Подождите перед повтором; проверьте VPN именно на этом ПК.', 'rate_limited')
         if any(marker in lowered for marker in ('sign in', 'log in', 'login required', 'private video')):
-            return 'Источник требует входа или доступен не всем. Автоматический вход в аккаунт не поддерживается.'
+            return DownloaderError('Источник требует входа или доступен не всем. '
+                'Вход в браузере не передаётся загрузчику автоматически.', 'authentication')
+        if ('403' in detail or '410' in detail) and 'unable to download video data' in detail.lower():
+            return DownloaderError('Сайт отклонил ссылку на видеопоток (HTTP 403/410). '
+                'Проверьте ссылку заново; не меняйте подключение или VPN на ПК между проверкой и скачиванием.',
+                'media_url_rejected')
+        if '403' in lowered or 'cloudflare' in lowered:
+            return DownloaderError('Сайт отклонил запрос с ПК с движком (HTTP 403). '
+                'Проверьте доступ к видео и подключение на этом ПК.', 'forbidden')
         if 'unsupported url' in lowered:
-            return 'Этот адрес не поддерживается загрузчиком. Используйте ссылку на отдельное видео или локальный файл.'
-        return re.sub(r'https?://\S+', '[ссылка]', detail)
+            return DownloaderError('Этот адрес не поддерживается загрузчиком. '
+                'Используйте ссылку на отдельное видео или локальный файл.', 'unsupported')
+        return DownloaderError(re.sub(r'https?://\S+', '[ссылка]', detail))
     except OSError:
-        return ''
+        return DownloaderError('Проверьте журнал загрузки.')
+
+
+def _safe_error(log_path):
+    return _download_error(log_path).detail
+
+
+def _validate_video_info(info):
+    if info.get('_type') in {'playlist', 'multi_video'} or info.get('entries') is not None:
+        raise RuntimeError('Выберите ссылку на одно видео, а не на подборку.')
+    if info.get('is_live') or info.get('live_status') == 'is_live':
+        raise RuntimeError('Прямые эфиры пока не поддерживаются. Нужна завершённая запись.')
+    if info.get('has_drm'):
+        raise RuntimeError('Защищённое DRM-видео не поддерживается.')
+    if info.get('vcodec') == 'none' and not any(f.get('vcodec') not in (None, 'none') for f in info.get('formats', [])):
+        raise RuntimeError('В ссылке нет видеодорожки.')
+
+
+def _validate_media_urls(info):
+    hosts = set()
+    for item in [info, *(info.get('formats') or [])]:
+        media_url = item.get('url')
+        if isinstance(media_url, str) and media_url.startswith(('https://', 'http://')):
+            hostname = urlsplit(media_url).hostname
+            if hostname not in hosts:
+                validate_public_url(media_url)
+                hosts.add(hostname)
 
 
 def register_url_routes(app, services):
@@ -162,20 +209,23 @@ def register_url_routes(app, services):
         else:
             process.terminate()
 
-    def run_downloader(job_id, args, *, collect=False):
+    def run_downloader(job_id, args, *, collect=False, log_name='download.log', source_url=None):
+        if cancelled(job_id):
+            raise services['Cancelled']()
         directory = data / 'jobs' / job_id
-        log_path = directory / 'download.log'
-        env = dict(os.environ)
+        log_path = directory / log_name
+        env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1')
         # Also works with the embeddable Python, which ignores PYTHONPATH.
         deps = str(Path(__file__).resolve().parents[1] / '.runtime' / 'deps')
         code = 'import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("yt_dlp",run_name="__main__")'
-        command = [sys.executable, '-B', '-c', code, deps, '--ignore-config', '--no-playlist', '--no-warnings',
+        command = [sys.executable, '-B', '-c', code, deps, '--ignore-config', '--no-playlist',
                    '--socket-timeout', '20', '--retries', '2', '--fragment-retries', '2', '--no-cache-dir',
                    *_runtime_arguments(), *args]
         output = []
         size = 0
         last_update = 0.0
-        with log_path.open('w', encoding='utf-8') as log:
+        with log_path.open('w', encoding='utf-8') as log, cookie_arguments(data, source_url) as authentication:
+            command[5:5] = authentication
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True,
                                        encoding='utf-8', errors='replace', env=env,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -215,7 +265,7 @@ def register_url_routes(app, services):
                 if cancelled(job_id):
                     raise services['Cancelled']()
                 if code:
-                    raise RuntimeError('Не удалось получить видео. ' + _safe_error(log_path))
+                    raise _download_error(log_path)
                 return ''.join(output) if collect else output
             finally:
                 stop_process(process)
@@ -228,16 +278,10 @@ def register_url_routes(app, services):
         url = request['url']
         update(job_id, message='Yoinks: поиск доступного качества…', progress=3)
         url = validate_public_url(url)
-        raw = run_downloader(job_id, ['--dump-single-json', '--skip-download', '--', url], collect=True)
-        info = json.loads(raw)
-        if info.get('_type') in {'playlist', 'multi_video'} or info.get('entries') is not None:
-            raise RuntimeError('Выберите ссылку на одно видео, а не на подборку.')
-        if info.get('is_live') or info.get('live_status') == 'is_live':
-            raise RuntimeError('Прямые эфиры пока не поддерживаются. Нужна завершённая запись.')
-        if info.get('has_drm'):
-            raise RuntimeError('Защищённое DRM-видео не поддерживается.')
-        if info.get('vcodec') == 'none' and not any(f.get('vcodec') not in (None, 'none') for f in info.get('formats', [])):
-            raise RuntimeError('В ссылке нет видеодорожки.')
+        raw = run_downloader(job_id, ['--dump-single-json', '--skip-download', '--', url], collect=True, source_url=url)
+        info = without_auth_metadata(json.loads(raw))
+        raw = json.dumps(info, ensure_ascii=False)
+        _validate_video_info(info)
         directory = data / 'jobs' / job_id
         (directory / 'link-info.json').write_text(raw, encoding='utf-8')
         choices = build_choices(info)
@@ -266,22 +310,39 @@ def register_url_routes(app, services):
         update(job_id, message='Yoinks: скачивание выбранного видео…', progress=3)
         cache = inspected / 'link-info.json'
         info = json.loads(cache.read_text('utf-8'))
-        # Validate media destinations before yt-dlp downloads the cached formats.
-        hosts = set()
-        for item in [info, *(info.get('formats') or [])]:
-            media_url = item.get('url')
-            if isinstance(media_url, str) and media_url.startswith(('https://', 'http://')):
-                hostname = urlsplit(media_url).hostname
-                if hostname not in hosts:
-                    validate_public_url(media_url)
-                    hosts.add(hostname)
-        inputs = ['--load-info-json', str(cache)] if time.time() - record['created'] < 900 else ['--', url]
+
+        def refresh_info():
+            update(job_id, progress=3, message='Обновление ссылки на видеопоток…')
+            raw = run_downloader(job_id, ['--dump-single-json', '--skip-download', '--', url],
+                                 collect=True, log_name='download-refresh.log', source_url=url)
+            fresh = without_auth_metadata(json.loads(raw))
+            _validate_video_info(fresh)
+            _validate_media_urls(fresh)
+            fresh_cache = directory / 'link-refreshed.json'
+            fresh_cache.write_text(json.dumps(fresh, ensure_ascii=False), encoding='utf-8')
+            return fresh, fresh_cache
+
+        refreshed = time.time() - record['created'] >= 900
+        if refreshed:
+            info, cache = refresh_info()
+        else:
+            _validate_video_info(info)
+            _validate_media_urls(info)
         args = ['-f', _format_selector(choice_id), '--merge-output-format', 'mp4', '--ffmpeg-location', ffmpeg,
                 '--max-filesize', os.environ.get('CLIPCANVAS_MAX_DOWNLOAD_SIZE', '16G'),
                 '--newline', '--no-quiet', '--progress', '--no-simulate',
                 '--progress-template', 'download:CLIPPROGRESS|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s',
-                '--print', 'after_move:CLIPFILE|%(filepath)s', '-o', str(target / 'source.%(ext)s'), *inputs]
-        paths = run_downloader(job_id, args)
+                '--print', 'after_move:CLIPFILE|%(filepath)s', '-o', str(target / 'source.%(ext)s')]
+        try:
+            paths = run_downloader(job_id, [*args, '--load-info-json', str(cache)], source_url=url)
+        except DownloaderError as error:
+            # Signed stream URLs can be rejected before their nominal expiry.
+            # Refresh once; never loop on rate limits, login or bot challenges.
+            if refreshed or error.reason != 'media_url_rejected':
+                raise
+            info, cache = refresh_info()
+            paths = run_downloader(job_id, [*args, '--load-info-json', str(cache)],
+                                   log_name='download-retry.log', source_url=url)
         if not paths:
             raise RuntimeError('Сайт не вернул готовый видеофайл.')
         downloaded = Path(paths[-1]).resolve()
@@ -303,6 +364,25 @@ def register_url_routes(app, services):
     def link_status():
         return {'available': importlib.util.find_spec('yt_dlp') is not None, 'engine': 'yoinks',
                 'version': '0.3.1-adapter', 'source_commit': YOINKS_COMMIT}
+
+    @app.get('/api/links/youtube-session')
+    def youtube_session_status():
+        return {'connected': session_path(data).is_file()}
+
+    @app.post('/api/links/youtube-session')
+    async def connect_youtube(file: UploadFile = File(...)):
+        try:
+            save_session(data, await file.read(MAX_COOKIE_BYTES + 1))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        finally:
+            await file.close()
+        return {'connected': True}
+
+    @app.delete('/api/links/youtube-session')
+    def disconnect_youtube():
+        session_path(data).unlink(missing_ok=True)
+        return {'connected': False}
 
     @app.post('/api/links/inspect')
     def inspect_link(request: InspectLink):

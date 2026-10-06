@@ -154,7 +154,7 @@
     if (dropPoint) { g.x = dropPoint.x - g.w / 2; g.y = dropPoint.y - g.h / 2; }
     const start = Math.max(part.start, Math.min(video.currentTime || part.start, part.end - .05)), end = Math.min(part.end, start + template.duration);
     if (end <= start) throw Error('Выберите участок с видео.');
-    const b = {id: crypto.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x === null ? null : p.x * rx, y: p.y === null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
+    const b = {id: ClipBrowser.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x === null ? null : p.x * rx, y: p.y === null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
     const sourceId = state.sourceId, projectId = state.projectId;
     await editor.loadBannerImage(b);
     if (sourceId !== state.sourceId || projectId !== state.projectId || busy()) throw Error('Проект изменился. Добавьте баннер ещё раз.');
@@ -192,7 +192,7 @@
     return JSON.stringify({source_id: state.sourceId, width: state.width, height: state.height, audio: state.audioIndex, video: state.geometry.video, advertising: state.advertising, advertId: state.advertId, banners: state.banners, cuts: state.cuts, subtitles: state.subtitles, ranges: state.ranges, splitMode: state.splitMode, partSeconds: state.partSeconds, partCount: state.partCount, mergeTail: state.mergeTail, background: state.background, exportClean: state.exportClean});
   }
   // Store only a digest in a job; exact project data remains the render request.
-  async function snapshotDigest() { const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(automaticSnapshot())); return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, '0')).join(''); }
+  async function snapshotDigest() { return ClipBrowser.sha256(automaticSnapshot()); }
   let autoStarting = false;
   $('runAutomatic').onclick = handle(async () => {
     if (busy() || autoStarting || window.ClipSubtitles?.running) throw Error('Дождитесь текущей задачи.');
@@ -203,7 +203,7 @@
       if (templateId) {
         const t = templates.find(item => item.id === templateId); if (!t) throw Error('Обновите библиотеку баннеров.');
         const part = project.parts[0], g = t.geometry, rx = state.width / t.width, ry = state.height / t.height;
-        project.banners.push({id: crypto.randomUUID(), name: t.name, asset_id: t.asset_id, enabled: true, timebase: 'source', start: part.start, end: Math.min(part.end, part.start + t.duration), loop: t.loop !== false, offset: Number(t.offset) || 0, volume: Number(t.volume) || 0, geometry: {...g, x: g.x * rx, y: g.y * ry, w: g.w * rx, h: g.h * ry}, chromakey: structuredClone(t.chromakey), instructions: t.instructions || '', layout_rules: structuredClone(t.layout_rules || {})});
+        project.banners.push({id: ClipBrowser.randomUUID(), name: t.name, asset_id: t.asset_id, enabled: true, timebase: 'source', start: part.start, end: Math.min(part.end, part.start + t.duration), loop: t.loop !== false, offset: Number(t.offset) || 0, volume: Number(t.volume) || 0, geometry: {...g, x: g.x * rx, y: g.y * ry, w: g.w * rx, h: g.h * ry}, chromakey: structuredClone(t.chromakey), instructions: t.instructions || '', layout_rules: structuredClone(t.layout_rules || {})});
       }
       if (!Object.entries(options).some(([k, v]) => ['banners', 'remove_background', 'remove_intro', 'remove_outro', 'subtitles'].includes(k) && v)) throw Error('Выберите хотя бы одно действие.');
       const beforeDigest = automaticSnapshot(), snapshot = await snapshotDigest();

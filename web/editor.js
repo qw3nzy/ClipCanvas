@@ -311,7 +311,7 @@
     try{
       const asset=await upload(file,'banner');ensure();const part=selectedPart(),start=part.start,end=Math.min(part.end,start+10);
       if(end<=start)throw Error('Сначала загрузите видео.');
-      b={id:crypto.randomUUID(),name:file.name,enabled:true,asset_id:asset.id,timebase:'source',start,end,loop:true,offset:0,volume:0,geometry:{x:0,y:0,w:state.width,h:state.height*.25,fit:'contain'},chromakey:{enabled:false,color:'#00ff00',similarity:.15,blend:.05}};
+      b={id:ClipBrowser.randomUUID(),name:file.name,enabled:true,asset_id:asset.id,timebase:'source',start,end,loop:true,offset:0,volume:0,geometry:{x:0,y:0,w:state.width,h:state.height*.25,fit:'contain'},chromakey:{enabled:false,color:'#00ff00',similarity:.15,blend:.05}};
       await loadBannerImage(b,asset);
       if(sourceId!==state.sourceId)throw Error('Исходник изменился. Добавьте баннер ещё раз.');
       checkpoint();state.banners.push(b);selectBanner(b.id);renderBannerList();changed();
@@ -372,7 +372,7 @@
   function onChange(){ensure();if(savedSource!==state.sourceId){savedSource=state.sourceId;selectedCue=-1;selectedBanner=null;keyImages.clear();videoBanners?.disposeAll();sync();}videoBanners?.sync();clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>{sync();},450);}
   function refreshEditorButtons(){for(const id of ['renderOne','analyzeBoundaries','autoRemoveBoundaries','addBannerFile','adaptBanner'])if($(id))$(id).disabled=!connected||busy()||!state.sourceId||(id==='adaptBanner'&&!getBanner());for(const id of ['saveModel','testModel'])if($(id))$(id).disabled=!connected||busy();if(previewIndex!==null&&!segments.length){$('playButton').disabled=true;$('seek').disabled=true;}}
   function projectRestored(){ensure();if(state.bannerId&&!state.banners.some(b=>b.asset_id===state.bannerId)){state.banners.unshift({id:'legacy-'+state.bannerId,name:'Баннер проекта',asset_id:state.bannerId,...structuredClone(state.banner),timebase:'source',end:Math.min(state.duration,state.banner.end),enabled:state.banner.enabled&&state.banner.start<state.duration,geometry:structuredClone(state.geometry.banner),chromakey:{enabled:false,color:'#00ff00',similarity:.15,blend:.05}});state.banner.enabled=false;state.bannerId=null;}
-    for(const b of state.banners){b.id ||= crypto.randomUUID();loadBannerImage(b).catch(error=>toast(error.message));}selectedCue=-1;selectedBanner=state.banners[0]?.id||null;sync();renderSubtitles();
+    for(const b of state.banners){b.id ||= ClipBrowser.randomUUID();loadBannerImage(b).catch(error=>toast(error.message));}selectedCue=-1;selectedBanner=state.banners[0]?.id||null;sync();renderSubtitles();
   }
   window.ClipEditor={getBanner,selectBanner,renderBannerList,loadBannerImage,bannerFrameChanged,bannerKeyImage,selectedPart,outputSegments,protectedCaptionRegions,openRoute,sync,changed:onChange,refreshButtons:refreshEditorButtons,projectRestored,studioTabOpened(key){const section={materials:'projects',find:'edit',templates:'design',checks:'export'}[key];if(section&&route!==section)openRoute(section);const panel=$('studioPanel'+key);if(panel?.parentElement?.tagName==='DETAILS')panel.parentElement.open=true;},connected(){loadAI().catch(error=>{$('modelStatus').textContent=error.message;});},applyJobResult:applyEditorJob,jobFinished,captionStyle,keptRanges,sourceToOutput,outputToSource};
   $('previewHint').textContent='Предпросмотр показывает композицию. Во вкладке «Монтаж» выберите часть, чтобы увидеть удаления и рекламные вставки.';

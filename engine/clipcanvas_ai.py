@@ -349,6 +349,10 @@ def _payload(messages, schema, config):
         'response_format': response_format, 'stream': False, 'max_tokens': config['max_tokens']}
 
 
+class ModelResponseLimitError(RuntimeError):
+    """An incomplete provider response; callers may retry a smaller batch."""
+
+
 def chat(messages, schema, directory, check_cancel, process_changed=lambda p: None):
     config = load_config(private=True)
     check_cancel()
@@ -378,7 +382,7 @@ def chat(messages, schema, directory, check_cancel, process_changed=lambda p: No
         if process.returncode or 'error' in result:
             raise RuntimeError(result.get('error', 'Процесс модели завершился без ответа.'))
         if result.get('done_reason') == 'length' or any(c.get('finish_reason') == 'length' for c in result.get('choices', []) if isinstance(c, dict)):
-            raise RuntimeError('Не хватило контекста или лимита ответа модели. Уменьшите окно анализа либо увеличьте контекст и лимит ответа в настройках.')
+            raise ModelResponseLimitError('Не хватило контекста или лимита ответа модели. Уменьшите окно анализа либо увеличьте контекст и лимит ответа в настройках.')
         try:
             if config['provider'] == 'ollama':
                 content = result.get('message', {}).get('content', '')

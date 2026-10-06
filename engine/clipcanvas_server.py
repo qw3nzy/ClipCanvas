@@ -182,6 +182,7 @@ class Banner(Strict):
     loop: bool = True
     offset: float = Field(default=0, ge=0, le=86400)
     volume: float = Field(default=0, ge=0, le=1)
+    speed: float = Field(default=1, ge=.25, le=4)
     chromakey: ChromaKey = Field(default_factory=ChromaKey)
     geometry: Geometry = Field(default_factory=lambda: Geometry(x=0, y=0, w=16, h=16))
     instructions: str = Field(default='', max_length=4000)
@@ -1216,6 +1217,21 @@ def output_metadata(path):
                 'size':path.stat().st_size}
 
 
+def audio_tempo_filter(speed):
+    """Chain atempo within its accurate 0.5–2 range; preserve the audio pitch."""
+    if speed == 1:
+        return ''
+    factors = []
+    while speed < .5:
+        factors.append(.5)
+        speed /= .5
+    while speed > 2:
+        factors.append(2)
+        speed /= 2
+    factors.append(speed)
+    return ','.join(f'atempo={factor:.6f}' for factor in factors)+','
+
+
 def render_segment(job_id,request,source,segment,name,progress_offset,progress_share,is_ad=False,paused_source=None,encoder='cpu'):
     directory = DATA/'jobs'/job_id
     duration = segment['duration']
@@ -1257,14 +1273,14 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         motion = record.get('media_type') == 'video'
         position = 0
         if motion:
-            elapsed = banner.offset+max(0, origin-banner.start)
+            elapsed = banner.offset+max(0, origin-banner.start)*banner.speed
             if banner.loop:
                 position = elapsed % record['duration']
             else:
                 if elapsed >= record['duration']:
                     continue
                 position = elapsed
-                z = min(z, a+record['duration']-position)
+                z = min(z, a+(record['duration']-position)/banner.speed)
             media_seek = position+max(0,record.get('video_start_time',0)-record.get('container_start_time',0))
             args += [*(['-stream_loop','-1'] if banner.loop else []),'-ss',f'{media_seek:.6f}',
                      *banner_decoder_options(record), '-i',str(record['path'])]
@@ -1321,7 +1337,7 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         b, key = banner.geometry, banner.chromakey
         label, composed = f'banner{number}', f'bannercomposite{number}'
         raw = f'bannertimed{number}'
-        filters.append(f'[{input_index}:v:0]trim=duration={z-a:.6f},setpts=PTS-STARTPTS+{a:.6f}/TB,'
+        filters.append(f'[{input_index}:v:0]trim=duration={(z-a)*banner.speed:.6f},setpts=(PTS-STARTPTS)/{banner.speed:.6f}+{a:.6f}/TB,'
                        f'scale=iw*sar:ih,setsar=1[{raw}]')
         if key.enabled:
             # colorkey replaces alpha, so multiply its mask by the original
@@ -1342,7 +1358,8 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         last = composed
         if audio_input is not None:
             sound = f'bannersound{number}'
-            filters.append(f'[{audio_input}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'
+            tempo = audio_tempo_filter(banner.speed)
+            filters.append(f'[{audio_input}:a:0]asetpts=PTS-STARTPTS,aresample=48000,'+tempo+
                 f'atrim=duration={z-a:.6f},volume={banner.volume:.6f},'
                 f'adelay={round(a*1000)}:all=1,apad=whole_dur={duration:.6f},'
                 f'atrim=duration={duration:.6f}[{sound}]')

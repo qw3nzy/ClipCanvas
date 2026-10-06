@@ -125,7 +125,7 @@
   bannerTools.querySelector('h2').after(library);
   const saveTemplate = action('Сохранить как готовый баннер', async () => {
     const b = editor.getBanner(); if (!b) throw Error('Сначала добавьте баннер.');
-    await post('/api/banner-templates', {name: (b.name || 'Мой баннер').slice(0, 70), asset_id: b.asset_id, width: state.width, height: state.height, geometry: b.geometry, chromakey: b.chromakey || {}, duration: Math.max(.1, b.end - b.start), loop: b.loop !== false, offset: Number(b.offset) || 0, volume: Number(b.volume) || 0, instructions: b.instructions || '', layout_rules: b.layout_rules || {}, schedule: b.schedule || {}, opacity: b.opacity ?? 1, fade_in: b.fade_in || 0, fade_out: b.fade_out || 0, motion: b.motion || [], locked: b.locked || false, lock_aspect: b.lock_aspect !== false});
+    await post('/api/banner-templates', {name: (b.name || 'Мой баннер').slice(0, 70), asset_id: b.asset_id, width: state.width, height: state.height, geometry: b.geometry, chromakey: b.chromakey || {}, duration: Math.max(.1, b.end - b.start), loop: b.loop !== false, offset: Number(b.offset) || 0, volume: Number(b.volume) || 0, speed: Number(b.speed) || 1, instructions: b.instructions || '', layout_rules: b.layout_rules || {}, schedule: b.schedule || {}, opacity: b.opacity ?? 1, fade_in: b.fade_in || 0, fade_out: b.fade_out || 0, motion: b.motion || [], locked: b.locked || false, lock_aspect: b.lock_aspect !== false});
     await loadTemplates(); toast('Баннер сохранён в библиотеке движка.');
   }); saveTemplate.id = 'saveBannerTemplate'; rotationControls.after(saveTemplate);
   async function loadTemplates() {
@@ -154,7 +154,7 @@
     if (dropPoint) { g.x = dropPoint.x - g.w / 2; g.y = dropPoint.y - g.h / 2; }
     const start = Math.max(part.start, Math.min(video.currentTime || part.start, part.end - .05)), end = Math.min(part.end, start + template.duration);
     if (end <= start) throw Error('Выберите участок с видео.');
-    const b = {id: ClipBrowser.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x === null ? null : p.x * rx, y: p.y === null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
+    const b = {id: ClipBrowser.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, speed: Number(template.speed) || 1, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x == null ? null : p.x * rx, y: p.y == null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
     const sourceId = state.sourceId, projectId = state.projectId;
     await editor.loadBannerImage(b);
     if (sourceId !== state.sourceId || projectId !== state.projectId || busy()) throw Error('Проект изменился. Добавьте баннер ещё раз.');
@@ -198,15 +198,19 @@
     if (busy() || autoStarting || window.ClipSubtitles?.running) throw Error('Дождитесь текущей задачи.');
     autoStarting = true; refresh();
     try {
-      const project = renderConfig(false), options = {banners: $('autoBanners').checked, remove_background: $('autoBackground').checked, remove_intro: $('autoIntro').checked, remove_outro: $('autoOutro').checked, subtitles: $('autoSubtitles').checked, correct_subtitles: true, speech_model: 'large-v3', language: state.speechLanguage || 'auto'};
+      let project = renderConfig(false); const options = {banners: $('autoBanners').checked, remove_background: $('autoBackground').checked, remove_intro: $('autoIntro').checked, remove_outro: $('autoOutro').checked, subtitles: $('autoSubtitles').checked, correct_subtitles: true, speech_model: 'large-v3', language: state.speechLanguage || 'auto'};
       const templateId = $('autoBannerTemplate').value;
       if (templateId) {
         const t = templates.find(item => item.id === templateId); if (!t) throw Error('Обновите библиотеку баннеров.');
         const part = project.parts[0], g = t.geometry, rx = state.width / t.width, ry = state.height / t.height;
-        project.banners.push({id: ClipBrowser.randomUUID(), name: t.name, asset_id: t.asset_id, enabled: true, timebase: 'source', start: part.start, end: Math.min(part.end, part.start + t.duration), loop: t.loop !== false, offset: Number(t.offset) || 0, volume: Number(t.volume) || 0, geometry: {...g, x: g.x * rx, y: g.y * ry, w: g.w * rx, h: g.h * ry}, chromakey: structuredClone(t.chromakey), instructions: t.instructions || '', layout_rules: structuredClone(t.layout_rules || {})});
+        project.banners.push({id: ClipBrowser.randomUUID(), name: t.name, asset_id: t.asset_id, enabled: true, timebase: 'source', start: part.start, end: Math.min(part.end, part.start + t.duration), loop: t.loop !== false, offset: Number(t.offset) || 0, volume: Number(t.volume) || 0, speed: Number(t.speed) || 1, geometry: {...g, x: g.x * rx, y: g.y * ry, w: g.w * rx, h: g.h * ry}, chromakey: structuredClone(t.chromakey), instructions: t.instructions || '', layout_rules: structuredClone(t.layout_rules || {}), schedule: structuredClone(t.schedule || {}), opacity: t.opacity ?? 1, fade_in: t.fade_in || 0, fade_out: t.fade_out || 0, motion: (t.motion || []).map(p => ({...p, x: p.x == null ? null : p.x * rx, y: p.y == null ? null : p.y * ry})), locked: t.locked || false, lock_aspect: t.lock_aspect !== false});
       }
       if (!Object.entries(options).some(([k, v]) => ['banners', 'remove_background', 'remove_intro', 'remove_outro', 'subtitles'].includes(k) && v)) throw Error('Выберите хотя бы одно действие.');
-      const beforeDigest = automaticSnapshot(), snapshot = await snapshotDigest();
+      const beforeDigest = automaticSnapshot();
+      const reviewed = await ClipBrief.confirm([{name:state.name || 'Текущий проект',config:project}], 'Подтвердите автоматический монтаж', ['Размещение баннеров','Удаление фона','Удаление интро','Удаление аутро','Субтитры'].filter((_,i)=>[options.banners,options.remove_background,options.remove_intro,options.remove_outro,options.subtitles][i]).join(' · '));
+      if(!reviewed)return; project=reviewed[0].config;
+      if (beforeDigest !== automaticSnapshot()) throw Error('Проект изменился. Запустите обработку ещё раз.');
+      const snapshot = await snapshotDigest();
       if (beforeDigest !== automaticSnapshot()) throw Error('Проект изменился. Запустите обработку ещё раз.');
       stopPlayback(); $('automaticReport').replaceChildren(); $('automaticStatus').textContent = 'Подготовка. Этапы обработки появятся в панели задачи.';
       const job = await startJob('/api/ai/automatic', {project, options, client_snapshot: snapshot}, 'automatic');

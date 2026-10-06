@@ -137,6 +137,29 @@ class VideoBannerTests(unittest.TestCase):
         self.assertGreater(self.tone(audio,440),.03)
         self.assertGreater(self.tone(audio,880),.015)
 
+    def test_speed_changes_visual_phase_and_preserves_audio_pitch_and_main_duration(self):
+        for speed in (.25,.5,2,4):
+            with self.subTest(speed=speed):
+                path,frames=self.render(f'speed-{speed}.mp4',{'speed':speed,'volume':.5})
+                self.assertEqual(len(frames),96)
+                for index in (17,23,31,37,47,61):
+                    phase=((index/24-.5)*speed)%1
+                    if min(abs(phase-.5),phase,1-phase)<.06:continue
+                    self.assertEqual(bool(frames[index][50,60,0]>200),phase<.5)
+                sound=self.audio(path)
+                self.assertGreater(self.tone(sound,440),.03)
+                self.assertGreater(self.tone(sound,880),.014,'Banner speed must preserve audio pitch')
+                if 880*speed!=440:self.assertLess(self.tone(sound,880*speed),.005)
+
+    def test_speed_without_loop_disappears_at_new_end_and_cut_preserves_phase(self):
+        _,frames=self.render('speed-once.mp4',{'loop':False,'speed':2,'offset':.25})
+        self.assertGreater(frames[16][50,60,1],220)
+        self.assertTrue(np.max(np.abs(frames[24][50,60].astype(int)-60))<12)
+        _,full=self.render('speed-full.mp4',{'speed':.5,'offset':.25})
+        _,later=self.render('speed-cut.mp4',{'speed':.5,'offset':.25},start=1.5,end=3)
+        for index in (3,9,15,21,27):
+            self.assertTrue(np.max(np.abs(full[36+index][50,60].astype(int)-later[index][50,60]))<12)
+
     def test_red_background_key_updates_each_frame(self):
         self.asset = self.red
         _, frames = self.render('red.mp4',{'chromakey':{'enabled':True,'color':'#ff0000','similarity':.1,'blend':.02}})

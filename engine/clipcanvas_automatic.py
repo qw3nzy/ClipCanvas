@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from clipcanvas_asr import SpeechModel
 from clipcanvas_composition import merged_cuts, retained_intervals
-from clipcanvas_layout import rotated_bounds
+from clipcanvas_layout import rotated_bounds, BannerRules, fixed_center_geometry, intersection
 from clipcanvas_studio import BoundaryAnalysis, BannerAdaptation, CaptionReview, formatted_cues
 from clipcanvas_pro import BannerSchedule, MotionPoint
 
@@ -50,6 +50,7 @@ class BannerTemplate(Strict):
     loop: bool = True
     offset: float = Field(default=0, ge=0, le=86400)
     volume: float = Field(default=0, ge=0, le=1)
+    speed: float = Field(default=1, ge=.25, le=4)
     instructions: str = Field(default='', max_length=4000)
     layout_rules: dict = Field(default_factory=dict)
     schedule: BannerSchedule = Field(default_factory=BannerSchedule)
@@ -229,6 +230,24 @@ class AutomaticEditor:
                     except (ValueError, RuntimeError, OSError) as error:
                         self.check(job_id)
                         record('background', 'skipped', str(error), **identity)
+            if not banner.get('locked'):
+                centered = fixed_center_geometry(banner['geometry'], BannerRules.model_validate(banner['layout_rules']),
+                    project['canvas']['width'], project['canvas']['height'], project['video'], banner['instructions'])
+                if centered:
+                    banner['geometry'] = centered
+                    # Exact positioning excludes movement/scale, retaining opacity keyframes.
+                    banner['motion'] = [{'time':point['time'],'opacity':point.get('opacity',1)} for point in banner['motion']]
+                    banner['layout_rules']['zone'] = 'center'
+                    sub = project['subtitles']
+                    protected = [protected_box(other['geometry']) for other in selected if other is not banner]
+                    if sub['enabled'] and sub['cues']:
+                        protected.extend(subtitle_regions(sub, project['canvas'], 0, source['duration']))
+                    overlap = any(intersection(rotated_bounds(centered), rotated_bounds(box)) for box in protected)
+                    reason = 'Баннер расположен точно по центру '+('области видео.' if banner['layout_rules'].get('center_reference')=='video' else 'холста.')
+                    if overlap:
+                        reason += ' Есть пересечение с текстом или другим баннером; центр сохранён по вашему ТЗ, проверьте результат.'
+                    record('banner-layout','applied',reason,fixed_position=True,**identity)
+                    continue
             if not options.banners:
                 continue
             if banner.get('locked'):
@@ -319,7 +338,7 @@ def register_banner_templates(app, context):
     def with_media(row):
         media = context['asset'](row['asset_id'], 'banner')
         return {**row, 'media_type': media.get('media_type', 'image'),
-                'media_duration': media.get('duration', 0), 'loop': row.get('loop', True),
+                'media_duration': media.get('duration', 0), 'audio':bool(media.get('audio')), 'speed':row.get('speed',1), 'loop': row.get('loop', True),
                 'offset': row.get('offset', 0), 'volume': row.get('volume', 0)}
 
     @app.get('/api/banner-templates')
@@ -335,6 +354,16 @@ def register_banner_templates(app, context):
 
     @app.post('/api/banner-templates')
     def save_template(request: BannerTemplate):
+        return persist_template(request)
+
+    @app.put('/api/banner-templates/{template_id}')
+    def update_template(template_id: str, request: BannerTemplate):
+        identity = context['identifier'](template_id)
+        if not (directory/(identity+'.json')).is_file():
+            raise HTTPException(404, 'Шаблон не найден.')
+        return persist_template(request, identity)
+
+    def persist_template(request, template_id=None):
         if not request.name.strip():
             raise HTTPException(422, 'Укажите название шаблона.')
         media = context['asset'](request.asset_id, 'banner')
@@ -344,7 +373,7 @@ def register_banner_templates(app, context):
             banner = context['Banner'].model_validate({'enabled': True, 'asset_id': request.asset_id,
                 'start': 0, 'end': request.duration, 'geometry': request.geometry, 'chromakey': request.chromakey,
                 'instructions': request.instructions, 'layout_rules': request.layout_rules,
-                'loop': request.loop, 'offset': request.offset, 'volume': request.volume,
+                'loop': request.loop, 'offset': request.offset, 'volume': request.volume, 'speed':request.speed,
                 **{key:getattr(request,key) for key in ('schedule','opacity','fade_in','fade_out','motion','locked','lock_aspect')}})
             geometry = banner.geometry
             if geometry.w > request.width*4 or geometry.h > request.height*4:
@@ -355,7 +384,7 @@ def register_banner_templates(app, context):
                 raise ValueError('Баннер должен находиться хотя бы частично внутри холста.')
         except ValueError as error:
             raise HTTPException(422, 'Некорректные настройки баннера: '+str(error)) from error
-        result = {**request.model_dump(), 'id': uuid.uuid4().hex, 'name': request.name.strip(),
+        result = {**request.model_dump(), 'id': template_id or uuid.uuid4().hex, 'name': request.name.strip(),
                   'geometry': banner.geometry.model_dump(), 'chromakey': banner.chromakey.model_dump(),
                   'layout_rules': banner.layout_rules.model_dump()}
         result = with_media(result)

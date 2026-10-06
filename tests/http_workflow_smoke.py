@@ -32,8 +32,9 @@ def main():
     shutil.copyfile(source, episodes/source.name)
     banner = directory/'banner.mp4'
     command(['-f','lavfi','-i','color=c=lime:s=160x80:r=24:d=1',
+        '-f','lavfi','-i','sine=frequency=1500:sample_rate=48000:duration=1',
         '-vf','drawbox=x=40:y=20:w=80:h=40:color=white:t=fill',
-        '-c:v','libx264','-pix_fmt','yuv420p',str(banner)])
+        '-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(banner)])
     token = secrets.token_urlsafe(32)
     environment = dict(os.environ)
     environment.update(CLIPCANVAS_DATA=str(directory/'data'), CLIPCANVAS_HOST=args.host,
@@ -59,7 +60,8 @@ def main():
             asset = client.upload(source, 'video')
             media = client.upload(banner, 'banner')
             template = client.request('/api/banner-templates', {'name':'HTTP QA banner', 'asset_id':media['id'],
-                'width':640,'height':360,'geometry':{'x':20,'y':20,'w':160,'h':80},'duration':3})
+                'width':640,'height':360,'geometry':{'x':20,'y':20,'w':160,'h':80},'duration':3,
+                'instructions':'Сохранить размер, не перекрывать субтитры.'})
             manifest = directory/'manifest.json'
             manifest.write_text(json.dumps({'base':client.base,'directory':str(directory),
                 'source_id':asset['id'],'banner_file':str(banner),'episodes':str(episodes),
@@ -71,6 +73,15 @@ def main():
             (directory/'browser.log').write_text(browser.stdout+browser.stderr,'utf-8')
             if browser.returncode:
                 raise AssertionError(browser.stderr or browser.stdout)
+            import numpy as np
+            pixels=command(['-ss','0.75','-i',str(directory/'confirmed-sample.mp4'),'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','pipe:1'])
+            frame=np.frombuffer(pixels,dtype=np.uint8).reshape(360,640,3)
+            assert min(frame[180,320])>220, 'Banner must be in exact canvas centre'
+            assert frame[50,80,2]>220 and frame[50,80,0]<40, 'Old high position must reveal source'
+            sound=np.frombuffer(command(['-i',str(directory/'confirmed-sample.mp4'),'-vn','-ac','1','-ar','48000','-f','f32le','pipe:1']),dtype=np.float32)[12000:84000]
+            tone=abs(np.dot(sound,np.exp(-2j*np.pi*1500*np.arange(len(sound))/48000)))/len(sound)
+            assert tone>.015, 'Selected banner audio must be audible at original pitch with 2x speed'
+            print('PASS: exported exact centre, audible banner at 2x with preserved pitch')
             print(browser.stdout)
             print('Evidence: '+str(directory))
         finally:

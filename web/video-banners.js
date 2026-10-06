@@ -4,7 +4,7 @@
 // offsets. All players follow source/output time rather than a separate clock.
 (() => {
   function targetTime(banner, duration, clock) {
-    const position = (Number(banner.offset) || 0) + clock - banner.start;
+    const position = (Number(banner.offset) || 0) + (clock - banner.start) * (Number(banner.speed) || 1);
     if (!(duration > 0)) return {time: 0, ended: true};
     if (banner.loop !== false) return {time: ((position % duration) + duration) % duration, ended: false};
     return {time: Math.max(0, Math.min(duration - .001, position)), ended: position < 0 || position >= duration};
@@ -110,7 +110,7 @@
         if (!target.visible || media.readyState < 2) { pauseRecord(record); continue; }
         const running = !transport.paused && !transport.ended && !transport.seeking;
         const rate = target.inAd ? transport.playbackRate / state.advertising.speed : transport.playbackRate;
-        media.playbackRate = rate || 1;
+        media.playbackRate = (rate || 1) * (Number(banner.speed) || 1);
         const desired = Math.min(Math.max(0, media.duration - .005), target.time);
         // Never seek again until the previous seek finishes. Paused scrubbing
         // needs frame precision; normal playback only corrects visible drift.

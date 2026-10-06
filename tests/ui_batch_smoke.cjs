@@ -25,7 +25,7 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
     await page.locator('#batchRemoveBackground').uncheck();await page.locator('#batchCheck').uncheck();await page.locator('#batchZip').uncheck();
     await page.screenshot({path:path.join(out,'folder-settings.png'),fullPage:true});
     const response=page.waitForResponse(r=>r.url().endsWith('/api/batch')&&r.request().method()==='POST');
-    await page.locator('#batchStart').click();const reply=await response;assert.equal(reply.status(),200,await reply.text());
+    await page.locator('#batchStart').click();await page.locator('#briefDialog').waitFor({state:'visible'});await page.locator('#briefConfirm').click();const reply=await response;assert.equal(reply.status(),200,await reply.text());
     const batchId=(await reply.json()).id;await waitBatch(batchId);
     await page.waitForFunction(()=>document.querySelectorAll('#batchRows tr').length===3&&document.getElementById('batchRows').textContent.includes('Ожидает принятия'));
     const batch=await page.evaluate(id=>api('/api/batches/'+id),batchId);

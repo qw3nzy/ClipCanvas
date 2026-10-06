@@ -17,7 +17,9 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
   const screenshot = name => page.screenshot({path: path.join(out, name+'.png'), fullPage: true});
   async function runJob(id, endpoint) {
     const response = page.waitForResponse(r => r.url().endsWith(endpoint) && r.request().method() === 'POST');
-    await page.locator('#'+id).click(); const reply = await response;
+    await page.locator('#'+id).click();
+    if(id==='runAutomatic'){await page.locator('#briefDialog').waitFor({state:'visible'});await page.locator('#briefConfirm').click();}
+    const reply = await response;
     assert.equal(reply.status(), 200, await reply.text()); const created = await reply.json();
     await page.waitForFunction(async id => { const job = await (await fetch('/api/jobs/'+id)).json(); if (job.status === 'error') throw Error(job.error); return job.status === 'done'; }, created.id, {timeout: 120000});
     await idle(); return page.evaluate(id => api('/api/jobs/'+id), created.id);

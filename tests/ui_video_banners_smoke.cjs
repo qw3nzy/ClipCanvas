@@ -67,6 +67,13 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     await page.locator('#bannerVideoLoop').uncheck();
     await seek(3.5); const hidden=await pixel(200,120); assert.ok(hidden[2]>180 && hidden[0]<60,'one-shot expires without freezing foreground');
     await page.locator('#bannerVideoLoop').check();
+    await page.locator('#bannerVideoSpeed').selectOption('2');await seek(1.75);
+    assert.equal(await page.evaluate(()=>ClipVideoBanners.get(state.banners[0]).playbackRate),2);
+    const sped=await pixel(200,120);assert.ok(sped[0]>200&&sped[1]>200&&sped[2]<80,'2x changes the visible banner phase');
+    await page.locator('#bannerVideoSound').check();assert.equal(await page.evaluate(()=>state.banners[0].volume),1);
+    await page.locator('#bannerVideoSound').uncheck();assert.equal(await page.evaluate(()=>state.banners[0].volume),0);
+    await page.locator('#bannerVideoSpeed').selectOption('1');
+    passed.push('Inspector changes actual banner playback speed and explicitly enables/disables audio');
     await page.locator('#bannerVideoOffset').fill('1'); await page.locator('#bannerVideoOffset').dispatchEvent('change');
     await page.locator('#bannerVideoVolume').evaluate(node=>{node.value='.4';node.dispatchEvent(new Event('input',{bubbles:true}));});
     await seek(1.25); const offset=await pixel(200,120); assert.ok(offset[0]>200 && offset[1]>200 && offset[2]<80,'media offset changes frame');
@@ -111,6 +118,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     for(const id of ['autoBanners','autoIntro','autoOutro','autoSubtitles']) await page.locator('#'+id).uncheck();
     await page.locator('#autoBackground').check();
     const autoResponse=page.waitForResponse(r=>r.url().endsWith('/api/ai/automatic') && r.request().method()==='POST'); await page.locator('#runAutomatic').click();
+    await page.locator('#briefDialog').waitFor({state:'visible'});await page.locator('#briefConfirm').click();
     const automatic=await (await autoResponse).json();await page.waitForFunction(id=>state.editor.automaticJobId===id,automatic.id,{timeout:120000});
     assert.equal(await page.evaluate(()=>state.banners[0].chromakey.enabled),true);assert.equal(await page.evaluate(()=>state.banners[0].volume),.4);
     passed.push('Automatic mode removes a video background using multiple frames and preserves playback/audio settings');

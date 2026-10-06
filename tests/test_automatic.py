@@ -57,6 +57,20 @@ class FakeStudio:
 
 
 class AutomaticTests(unittest.TestCase):
+    def test_explicit_center_skips_model_preserves_audio_speed_and_removes_motion(self):
+        original=payload();original['banners'][0].update(instructions='Баннер по центру холста.',volume=.8,speed=2,
+            motion=[{'time':0,'x':10,'y':10,'scale':2,'opacity':.5}])
+        snapshot=deepcopy(original)
+        self.editor.job('job',Automatic(project=original,options=AutomaticOptions(subtitles=False,
+            remove_intro=False,remove_outro=False,remove_background=False,banners=True)))
+        self.assertEqual(self.studio.layouts,[])
+        banner=self.jobs['job']['project']['banners'][0]
+        self.assertEqual((banner['geometry']['x'],banner['geometry']['y']),(260,160))
+        self.assertEqual((banner['volume'],banner['speed']),(.8,2))
+        self.assertTrue(all(point['x'] is None and point['y'] is None and point['scale']==1 for point in banner['motion']))
+        self.assertEqual(original,snapshot)
+        self.assertTrue(self.jobs['job']['automatic_report'][0]['fixed_position'])
+
     def test_scheduled_output_banner_is_analyzed_without_losing_schedule(self):
         original=payload()
         original['banners'][0].update(timebase='output', schedule={'mode':'full'},
@@ -261,13 +275,21 @@ class AutomaticTests(unittest.TestCase):
         register_automatic_routes(app, self.context, self.studio)
         client = TestClient(app)
         template = {'name': 'Motion banner', 'asset_id': 'b'*32, 'width': 640, 'height': 360,
-                    'geometry': payload()['banners'][0]['geometry'], 'offset': .75, 'volume': .35, 'loop': False}
+                    'geometry': payload()['banners'][0]['geometry'], 'offset': .75, 'volume': .35, 'loop': False, 'speed':2}
         response = client.post('/api/banner-templates', json=template)
         self.assertEqual(response.status_code, 200, response.text)
         saved = response.json()
         self.assertEqual((saved['media_type'], saved['media_duration']), ('video', 2.0))
         self.assertEqual((saved['offset'], saved['volume'], saved['loop']), (.75, .35, False))
+        self.assertEqual(saved['speed'],2)
         self.assertEqual(client.get('/api/banner-templates').json()['templates'], [saved])
+        response=client.put('/api/banner-templates/'+saved['id'],json={**template,'volume':1,'speed':.5})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['id'],saved['id'])
+        self.assertEqual((response.json()['volume'],response.json()['speed']),(1,.5))
+        self.assertEqual(len(client.get('/api/banner-templates').json()['templates']),1)
+        self.assertEqual(client.put('/api/banner-templates/'+'f'*32,json=template).status_code,404)
+        self.assertEqual(client.post('/api/banner-templates',json={**template,'speed':5}).status_code,422)
         self.assertEqual(client.post('/api/banner-templates', json={**template, 'offset': 2}).status_code, 422)
 
     def test_automatic_api_rejects_invalid_project_before_queue(self):

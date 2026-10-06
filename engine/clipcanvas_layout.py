@@ -29,7 +29,8 @@ class BannerRules(BaseModel):
     resizable: bool = False
     min_width: float = Field(default=0, ge=0, le=3840)
     min_height: float = Field(default=0, ge=0, le=3840)
-    zone: Literal['any', 'top', 'bottom', 'left', 'right'] = 'any'
+    zone: Literal['any', 'top', 'bottom', 'left', 'right', 'center'] = 'any'
+    center_reference: Literal['canvas', 'video'] = 'canvas'
 
 
 BANNER_SCHEMA = {'type': 'object', 'properties': {
@@ -44,7 +45,7 @@ BANNER_SCHEMA = {'type': 'object', 'properties': {
         'min_height': {'type': 'number', 'minimum': 0, 'maximum': 3840},
         'max_width': {'type': 'number', 'minimum': 0, 'maximum': 3840},
         'max_height': {'type': 'number', 'minimum': 0, 'maximum': 3840},
-        'zone': {'type': 'string', 'enum': ['any', 'top', 'bottom', 'left', 'right']},
+        'zone': {'type': 'string', 'enum': ['any', 'top', 'bottom', 'left', 'right', 'center']},
         'reason': {'type': 'string', 'maxLength': 500}},
         'required': ['can_adapt', 'lock_size', 'lock_position', 'min_width', 'min_height', 'max_width', 'max_height', 'zone', 'reason'],
         'additionalProperties': False}}, 'required': ['regions', 'requirements'], 'additionalProperties': False}
@@ -73,6 +74,39 @@ def enforce_client_locks(requirements, instructions):
                             (' и ' if size and position else '')+('перемещение' if position else '')+
                             '. Разрешённая зона: '+{'any': 'любая', 'top': 'сверху', 'bottom': 'снизу',
                             'left': 'слева', 'right': 'справа'}.get(result.get('zone'), 'по ТЗ')+'.')
+    return result
+
+
+def explicitly_centered(instructions):
+    """Recognise an explicit positive centre request; never infer it from imagery."""
+    for clause in re.split(r'[.!?;\n]', instructions.casefold()):
+        if not re.search(r'\b(?:по\s+центру|в\s+центре|центрировать|center(?:ed)?|centre(?:d)?)\b', clause):
+            continue
+        if re.search(r'\b(?:не|нельзя|not|never)\s+(?:(?:размещать|ставить|показывать|place|put)\s+)?(?:по\s+центру|в\s+центре|center|centre)', clause):
+            continue
+        if re.search(r'\b(?:логотип|надпись|текст)\b.*\b(?:баннера|изображения)\b', clause):
+            continue
+        return True
+    return False
+
+
+def fixed_center_geometry(original, rules, width, height, video=None, instructions=''):
+    if not rules.movable or enforce_client_locks({'lock_size':False,'lock_position':False},instructions)['lock_position']:
+        return None
+    if rules.zone != 'center' and not explicitly_centered(instructions):
+        return None
+    if rules.zone not in {'any','center'}:
+        raise ValueError('ТЗ требует центр, но выбрана другая зона. Согласуйте положение баннера.')
+    if original['w'] < rules.min_width-.001 or original['h'] < rules.min_height-.001:
+        raise ValueError('Размер баннера меньше минимума в ТЗ. Увеличьте размер перед точным центрированием.')
+    reference = video if rules.center_reference == 'video' else {'x':0,'y':0,'w':width,'h':height}
+    if reference is None:
+        raise ValueError('Для центра видео нужен его макет.')
+    result = {**original, 'x':reference['x']+(reference['w']-original['w'])/2,
+              'y':reference['y']+(reference['h']-original['h'])/2}
+    bounds = rotated_bounds(result)
+    if bounds['x'] < -.001 or bounds['y'] < -.001 or bounds['x']+bounds['w'] > width+.001 or bounds['y']+bounds['h'] > height+.001:
+        raise ValueError('Баннер с заданным размером не помещается по центру. Уменьшите его размер или измените макет.')
     return result
 
 
@@ -129,7 +163,7 @@ def validated_regions(response, frame_count, source_width, source_height, video,
     return result
 
 
-def choose_layout(original, rules, requirements, protected, width, height, image_aspect=None):
+def choose_layout(original, rules, requirements, protected, width, height, image_aspect=None, video=None):
     required = BANNER_SCHEMA['properties']['requirements']['required']
     if not isinstance(requirements, dict) or any(key not in requirements for key in required):
         raise ValueError('Модель не проверила ТЗ баннера. Размещение не применено.')
@@ -142,7 +176,7 @@ def choose_layout(original, rules, requirements, protected, width, height, image
             raise ValueError('Некорректные размеры в ТЗ баннера.')
     zone = rules.zone
     requested_zone = requirements['zone']
-    if requested_zone not in {'any', 'top', 'bottom', 'left', 'right'}:
+    if requested_zone not in {'any', 'top', 'bottom', 'left', 'right', 'center'}:
         raise ValueError('Некорректная зона в ТЗ баннера.')
     if not requirements['can_adapt'] or (zone != 'any' and requested_zone not in {'any', zone}):
         return None
@@ -175,7 +209,12 @@ def choose_layout(original, rules, requirements, protected, width, height, image
         mx = min(width*.04, max(0, (width-extent['w'])/2))
         my = min(height*.04, max(0, (height-extent['h'])/2))
         positions = [(original['x'], original['y'])]
-        if movable:
+        if zone == 'center':
+            centered = fixed_center_geometry({**original,'w':w,'h':h}, rules.model_copy(update={'zone':'center','movable':True}), width, height, video)
+            if not movable and (abs(centered['x']-original['x']) > .001 or abs(centered['y']-original['y']) > .001):
+                continue
+            positions = [(centered['x'], centered['y'])]
+        elif movable:
             positions += [(x, y) for x in (mx+dx, (width-w)/2, width-w-mx-dx)
                           for y in (my+dy, (height-h)/2, height-h-my-dy)]
             # Edge positions between corners help narrow banners fit around faces.

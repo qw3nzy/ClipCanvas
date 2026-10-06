@@ -92,6 +92,7 @@
   const selection = $('selection');
   selection.addEventListener('pointerdown', e => {
     if (state.layer !== 'editorBanner') return;
+    if (editor.getBanner()?.locked) { e.preventDefault(); e.stopImmediatePropagation(); return; }
     e.preventDefault(); e.stopImmediatePropagation(); const g = state.geometry.editorBanner; if (!g) return;
     checkpoint(); const box = $('stage').getBoundingClientRect(), scale = state.width / box.width;
     gesture = {g: {...g}, x: e.clientX, y: e.clientY, scale, handle: e.target.dataset.handle, cx: box.left + (g.x + g.w / 2) / scale, cy: box.top + (g.y + g.h / 2) / scale};
@@ -108,6 +109,7 @@
       const angle = (a.rotation || 0) * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle), sx = gesture.handle.includes('w') ? -1 : 1, sy = gesture.handle.includes('n') ? -1 : 1;
       g.w = Math.max(16, Math.min(state.width * 4, a.w + sx * (dx * c + dy * s)));
       g.h = Math.max(16, Math.min(state.height * 4, a.h + sy * (-dx * s + dy * c)));
+      if (editor.getBanner()?.lock_aspect || e.shiftKey) { const ratio = a.w / a.h; if (Math.abs(g.w - a.w) / a.w >= Math.abs(g.h - a.h) / a.h) g.h = g.w / ratio; else g.w = g.h * ratio; }
       const localX = sx * (g.w - a.w) / 2, localY = sy * (g.h - a.h) / 2;
       g.x = a.x + a.w / 2 + localX * c - localY * s - g.w / 2; g.y = a.y + a.h / 2 + localX * s + localY * c - g.h / 2;
     }
@@ -123,7 +125,7 @@
   bannerTools.querySelector('h2').after(library);
   const saveTemplate = action('Сохранить как готовый баннер', async () => {
     const b = editor.getBanner(); if (!b) throw Error('Сначала добавьте баннер.');
-    await post('/api/banner-templates', {name: (b.name || 'Мой баннер').slice(0, 70), asset_id: b.asset_id, width: state.width, height: state.height, geometry: b.geometry, chromakey: b.chromakey || {}, duration: Math.max(.1, b.end - b.start), loop: b.loop !== false, offset: Number(b.offset) || 0, volume: Number(b.volume) || 0, instructions: b.instructions || '', layout_rules: b.layout_rules || {}});
+    await post('/api/banner-templates', {name: (b.name || 'Мой баннер').slice(0, 70), asset_id: b.asset_id, width: state.width, height: state.height, geometry: b.geometry, chromakey: b.chromakey || {}, duration: Math.max(.1, b.end - b.start), loop: b.loop !== false, offset: Number(b.offset) || 0, volume: Number(b.volume) || 0, instructions: b.instructions || '', layout_rules: b.layout_rules || {}, schedule: b.schedule || {}, opacity: b.opacity ?? 1, fade_in: b.fade_in || 0, fade_out: b.fade_out || 0, motion: b.motion || [], locked: b.locked || false, lock_aspect: b.lock_aspect !== false});
     await loadTemplates(); toast('Баннер сохранён в библиотеке движка.');
   }); saveTemplate.id = 'saveBannerTemplate'; rotationControls.after(saveTemplate);
   async function loadTemplates() {
@@ -152,7 +154,7 @@
     if (dropPoint) { g.x = dropPoint.x - g.w / 2; g.y = dropPoint.y - g.h / 2; }
     const start = Math.max(part.start, Math.min(video.currentTime || part.start, part.end - .05)), end = Math.min(part.end, start + template.duration);
     if (end <= start) throw Error('Выберите участок с видео.');
-    const b = {id: crypto.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {})};
+    const b = {id: crypto.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x === null ? null : p.x * rx, y: p.y === null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
     const sourceId = state.sourceId, projectId = state.projectId;
     await editor.loadBannerImage(b);
     if (sourceId !== state.sourceId || projectId !== state.projectId || busy()) throw Error('Проект изменился. Добавьте баннер ещё раз.');

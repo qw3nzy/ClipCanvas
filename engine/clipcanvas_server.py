@@ -32,6 +32,8 @@ from clipcanvas_composition import (composition_timeline, remap_after_cuts, time
                                    normalize_rotation, banner_rotation_filter, banner_overlay_position)
 from clipcanvas_asr import SpeechModel, recognize
 from clipcanvas_layout import BannerRules, rotated_bounds
+from clipcanvas_pro import (MotionPoint, BannerSchedule, AudioSettings, Framing, DeliveryRules,
+                            TextOverlay, effective_payload, motion_expression, disk_estimate)
 
 ROOT = Path(os.environ.get('CLIPCANVAS_APP_ROOT', Path(__file__).resolve().parent.parent)).resolve()
 DATA = Path(os.environ.get('CLIPCANVAS_DATA', str(ROOT/'data'))).resolve()
@@ -54,7 +56,8 @@ PROCESSES: dict[str, subprocess.Popen] = {}
 FUTURES: dict[str, concurrent.futures.Future] = {}
 JOB_TYPES: dict[str, tuple] = {}
 JOB_SIDECARS = {'request':'request.json','cues':'cues.json','reviewed_cues':'reviewed-cues.json',
-                'overview':'overview.json','changes':'changes.json','project':'automatic-project.json'}
+                'overview':'overview.json','changes':'changes.json','project':'automatic-project.json',
+                'batch_items':'batch-items.json'}
 PROJECT_SUMMARIES: dict[str, tuple] = {}
 BANNER_MEDIA_LOCKS: dict[str, threading.Lock] = {}
 LOCK = threading.RLock()
@@ -64,7 +67,7 @@ SESSIONS: set[str] = set()
 ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 if (ROOT/'allowed-origins.json').exists():
     ALLOWED_ORIGINS.update(json.loads((ROOT/'allowed-origins.json').read_text('utf-8')))
-app = FastAPI(title='ClipCanvas', version='2.3.1', docs_url=None, redoc_url=None)
+app = FastAPI(title='ClipCanvas', version='3.0.0', docs_url=None, redoc_url=None)
 
 
 def now():
@@ -183,8 +186,18 @@ class Banner(Strict):
     geometry: Geometry = Field(default_factory=lambda: Geometry(x=0, y=0, w=16, h=16))
     instructions: str = Field(default='', max_length=4000)
     layout_rules: BannerRules = Field(default_factory=BannerRules)
+    schedule: BannerSchedule = Field(default_factory=BannerSchedule)
+    opacity: float = Field(default=1, ge=0, le=1)
+    fade_in: float = Field(default=0, ge=0, le=10)
+    fade_out: float = Field(default=0, ge=0, le=10)
+    locked: bool = False
+    lock_aspect: bool = True
+    motion: list[MotionPoint] = Field(default_factory=list, max_length=100)
     @model_validator(mode='after')
     def interval(self):
+        self.motion.sort(key=lambda point: point.time)
+        if len({point.time for point in self.motion}) != len(self.motion):
+            raise ValueError('Ключевые кадры баннера должны иметь разные времена.')
         if self.enabled and (not self.asset_id or self.end <= self.start):
             raise ValueError('Проверьте файл и время показа баннера.')
         return self
@@ -272,6 +285,17 @@ class Subtitles(Strict):
         return self
 
 
+class ClipOverride(Strict):
+    video: Geometry | None = None
+    banners: list[Banner] | None = Field(default=None, max_length=100)
+    subtitles: CaptionAppearance | None = None
+    subtitles_enabled: bool | None = None
+    advertising_enabled: bool | None = None
+    audio: AudioSettings | None = None
+    framing: Framing | None = None
+    text_layers: list[TextOverlay] | None = Field(default=None, max_length=50)
+
+
 class Part(Strict):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
@@ -331,8 +355,15 @@ class Render(Strict):
     encoder: Literal['auto', 'cpu', 'nvidia'] = 'auto'
     fps: Literal[24, 30, 60] = 30
     zip: bool = False
+    clip_overrides: dict[str, ClipOverride] = Field(default_factory=dict, max_length=1000)
+    audio: AudioSettings = Field(default_factory=AudioSettings)
+    framing: Framing = Field(default_factory=Framing)
+    delivery: DeliveryRules = Field(default_factory=DeliveryRules)
+    text_layers: list[TextOverlay] = Field(default_factory=list, max_length=50)
     @model_validator(mode='after')
     def bounds(self):
+        if any(not key.isdecimal() or not 1 <= int(key) <= 1000 for key in self.clip_overrides):
+            raise ValueError('Настройки частей должны использовать номера от 1 до 1000.')
         if self.video.rotation or (self.advertising.geometry and self.advertising.geometry.rotation):
             raise ValueError('Поворот доступен для баннеров; поворот видео и рекламного ролика пока не поддерживается.')
         layers = [self.video]
@@ -457,14 +488,15 @@ def audio_index(source, selected):
 
 @app.get('/api/health')
 def health(request: Request = None):
-    result = {'status':'ok', 'app':'ClipCanvas', 'version':'2.3.1', 'ffmpeg':Path(FFMPEG).exists(),
+    result = {'status':'ok', 'app':'ClipCanvas', 'version':'3.0.0', 'ffmpeg':Path(FFMPEG).exists(),
             'authenticated':not REMOTE or bool(request and authorized(request)),
             'root':str(ROOT), 'instance_id':INSTANCE_ID, 'pid':os.getpid(),
             'capabilities':{'auth_required':REMOTE, 'audio_tracks':True, 'embedded_subtitles':True,
                 'bitmap_ocr':False, 'advertising':True, 'projects':True, 'retry':True,
                 'max_parts':1000, 'subtitle_styles':['clean','word','cinema'], 'sample_max_source_duration':None,
                 'composition_version':2, 'multiple_banners':True, 'non_destructive_cuts':True,
-                'render_encoders':list(available_encoders(FFMPEG))}}
+                'render_encoders':list(available_encoders(FFMPEG)), 'batch':True, 'delivery_profiles':True,
+                'banner_schedules':True, 'clip_overrides':True}}
     if REMOTE and not (request and authorized(request)):
         result.pop('root',None)
         result.pop('pid',None)
@@ -750,7 +782,8 @@ def update(job_id, **values):
 
 def cancelled(job_id):
     with LOCK:
-        return SHUTTING_DOWN or JOBS[job_id].get('cancel_requested', False)
+        job = JOBS[job_id]
+        return SHUTTING_DOWN or job.get('cancel_requested', False) or bool(job.get('parent_id') and cancelled(job['parent_id']))
 
 
 class Cancelled(Exception):
@@ -785,7 +818,7 @@ def enqueue(job_id, task, request):
         FUTURES[job_id] = future
 
 
-def create_job(task, request, kind=None, cached=None):
+def create_job(task, request, kind=None, cached=None, parent_id=None):
     with LOCK:
         if SHUTTING_DOWN:
             raise HTTPException(503, 'Программа завершает работу.')
@@ -797,6 +830,8 @@ def create_job(task, request, kind=None, cached=None):
         JOBS[job_id] = {'id':job_id,'type':kind or task.__name__,'status':'queued','progress':0,'message':'В очереди…',
                        'files':[],'outputs':[],'completed_parts':[],'cancel_requested':False,
                        'request':request.model_dump() if hasattr(request,'model_dump') else dict(request),'created_at':now(),'updated_at':now()}
+        if parent_id:
+            JOBS[job_id].update(parent_id=identifier(parent_id), internal=True)
         persist(job_id)
         if cached is not None:
             write_srt(DATA/'jobs'/job_id/'subtitles.srt', cached['cues'])
@@ -809,6 +844,40 @@ def create_job(task, request, kind=None, cached=None):
 
 def register_job_type(name, model, task):
     JOB_TYPES[name] = (model,task)
+
+
+def inline_job(parent_id, task, request, kind, existing=None, on_created=None):
+    """Run a batch stage in the current worker; never enqueue behind its parent."""
+    if cancelled(parent_id):
+        raise Cancelled()
+    with LOCK:
+        job_id = existing or uuid.uuid4().hex
+        if existing:
+            job = JOBS[job_id]
+            if job['request'] != request.model_dump():
+                raise ValueError('Настройки продолжения не совпадают с сохранённой задачей.')
+        else:
+            (DATA/'jobs'/job_id).mkdir()
+            JOBS[job_id] = {'id':job_id, 'type':kind, 'parent_id':parent_id, 'internal':True,
+                'files':[], 'outputs':[], 'completed_parts':[], 'request':request.model_dump(),
+                'created_at':now(), 'updated_at':now()}
+        update(job_id, parent_id=parent_id, status='running', progress=0, cancel_requested=False, error=None, message='Обработка серии…')
+    if on_created:
+        on_created(job_id)
+    try:
+        task(job_id, request)
+        if cancelled(job_id):
+            raise Cancelled()
+        update(job_id, status='done', progress=100, message='Готово')
+    except Cancelled:
+        update(job_id, status='cancelled', message='Остановлено; можно продолжить.')
+        raise
+    except Exception as error:
+        update(job_id, status='error', error=str(error), message=str(error))
+        raise
+    finally:
+        clean_job_temporary_files(job_id)
+    return get_job(job_id)
 
 
 def clean_job_temporary_files(job_id):
@@ -901,6 +970,68 @@ def layer_filter(label, geometry, out):
     if geometry.fit == 'cover':
         return f'[{label}]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=rgba[{out}]'
     return f'[{label}]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,format=rgba,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[{out}]'
+
+
+def video_layer_filter(label, geometry, framing, start, out):
+    if geometry.fit != 'cover' or framing.mode == 'manual':
+        return layer_filter(label, geometry, out)
+    points = [point.model_dump() for point in framing.points]
+    clock = f'(t+{start:.6f})'
+    fx = motion_expression(points, 'x', framing.x, clock, framing.interpolation == 'hold')
+    fy = motion_expression(points, 'y', framing.y, clock, framing.interpolation == 'hold')
+    w, h = even(geometry.w), even(geometry.h)
+    return (f'[{label}]scale={w}:{h}:force_original_aspect_ratio=increase,'
+            f"crop={w}:{h}:x='max(0,min(iw-ow,iw*({fx})-ow/2))':"
+            f"y='max(0,min(ih-oh,ih*({fy})-oh/2))',setsar=1,format=rgba[{out}]")
+
+
+def moving_banner_filter(label, banner, origin, out):
+    points = [point.model_dump() for point in banner.motion]
+    clock = f'(t+{origin-banner.start:.6f})'
+    scale = motion_expression(points, 'scale', 1, clock)
+    filters = [f'[{label}]scale=w=\'max(2,trunc(iw*({scale})/2)*2)\':h=\'max(2,trunc(ih*({scale})/2)*2)\':eval=frame'] if points else [f'[{label}]null']
+    if banner.opacity != 1 or points or banner.fade_in or banner.fade_out:
+        alpha_clock = f'(T+{origin-banner.start:.6f})'
+        alpha = motion_expression(points, 'opacity', 1, alpha_clock)
+        alpha = f'{banner.opacity:.6f}*({alpha})'
+        if banner.fade_in:
+            alpha += f'*min(1,max(0,({alpha_clock})/{banner.fade_in:.6f}))'
+        if banner.fade_out:
+            alpha += f'*min(1,max(0,({banner.end-banner.start:.6f}-({alpha_clock}))/{banner.fade_out:.6f}))'
+        filters.append(f"format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*({alpha})'")
+    return ','.join(filters)+f'[{out}]'
+
+
+def write_text_ass(path, request, segment, is_ad):
+    events = []
+    for text in request.text_layers:
+        if not text.enabled or (is_ad and text.timebase == 'source'):
+            continue
+        origin = segment['output_start'] if text.timebase == 'output' else segment['start']
+        a, b = max(0, text.start-origin), min(segment['duration'], text.end-origin)
+        if b <= a:
+            continue
+        tags = (r'{\an5\pos('+f'{request.canvas.width*text.x/100:.3f},{request.canvas.height*text.y/100:.3f}'+
+                r')\fn'+text.font+r'\fs'+str(text.size)+r'\b'+('1' if text.bold else '0')+
+                r'\1c'+ass_color(text.color)+r'&\bord2\shad0}')
+        if text.background:
+            tags = tags[:-1]+r'\3c&H000000&\bord6}'
+        events.append(f'Dialogue: 2,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{tags}{ass_text(text.text)}\n')
+    if not events:
+        return False
+    header = f'''[Script Info]
+ScriptType: v4.00+
+PlayResX: {request.canvas.width}
+PlayResY: {request.canvas.height}
+WrapStyle: 0
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,0,5,20,20,0,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+'''
+    path.write_text(header+''.join(events), 'utf-8-sig')
+    return True
 
 
 def banner_key_filters(label, key, out, prefix):
@@ -1164,7 +1295,13 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         else:
             filters += [frozen_base+'[fmain]',f'color=c={bg.color}:s={c.width}x{c.height}:r={request.fps}:d={duration:.6f}[bgbase]']
         original_geometry = request.video
-        filters += [layer_filter('fmain',original_geometry,'frozenforeground'),
+        from clipcanvas_pro import interpolate
+        focus_time = segment.get('source_position', start)
+        focus_points = [point.model_dump() for point in request.framing.points]
+        frozen_framing = request.framing.model_copy(update={'points':[],
+            'x':interpolate(focus_points, focus_time, 'x', request.framing.x, request.framing.interpolation == 'hold'),
+            'y':interpolate(focus_points, focus_time, 'y', request.framing.y, request.framing.interpolation == 'hold')})
+        filters += [video_layer_filter('fmain',original_geometry,frozen_framing,focus_time,'frozenforeground'),
             f'[bgbase][frozenforeground]overlay=x={round(original_geometry.x)}:y={round(original_geometry.y)}:shortest=1[bg]']
     elif bg.enabled:
         blur = round(bg.blur)
@@ -1177,7 +1314,7 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         filters.append(f'[mainraw]format=rgba,colorkey=0x{key.get("color","#00ff00").lstrip("#")}:{key.get("similarity",.15)}:{key.get("blend",.05)}[main]')
     else:
         filters.append('[mainraw]null[main]')
-    filters += [layer_filter('main',geometry,'foreground'),f'[bg][foreground]overlay=x={round(geometry.x)}:y={round(geometry.y)}:shortest=1[composite]']
+    filters += [video_layer_filter('main',geometry,request.framing,start,'foreground') if not is_ad else layer_filter('main',geometry,'foreground'),f'[bg][foreground]overlay=x={round(geometry.x)}:y={round(geometry.y)}:shortest=1[composite]']
     last = 'composite'
     banner_sounds = []
     for number, (input_index, banner, a, z, record, audio_input) in enumerate(banners):
@@ -1193,9 +1330,15 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
             filters.extend(banner_key_filters(raw,key,keyed,f'bkey{number}'))
             raw = keyed
         fitted = f'bannerfitted{number}'
-        x, y = banner_overlay_position(b)
-        filters += [layer_filter(raw,b,fitted), banner_rotation_filter(fitted,b.rotation,label),
-            f"[{last}][{label}]overlay=x={x}:y={y}:enable='gte(t,{a:.6f})*lt(t,{z:.6f})':eof_action=pass:repeatlast=0:shortest=0[{composed}]"]
+        moved = f'bannermoved{number}'
+        origin = segment['output_start'] if banner.timebase == 'output' else start
+        points = [point.model_dump() for point in banner.motion]
+        clock = f'(t+{origin-banner.start:.6f})'
+        scale = motion_expression(points, 'scale', 1, clock)
+        x = motion_expression(points, 'x', b.x, clock)+f'+{b.w:.6f}*({scale})/2-overlay_w/2'
+        y = motion_expression(points, 'y', b.y, clock)+f'+{b.h:.6f}*({scale})/2-overlay_h/2'
+        filters += [layer_filter(raw,b,fitted), moving_banner_filter(fitted,banner,origin,moved), banner_rotation_filter(moved,b.rotation,label),
+            f"[{last}][{label}]overlay=x='{x}':y='{y}':enable='gte(t,{a:.6f})*lt(t,{z:.6f})':eof_action=pass:repeatlast=0:shortest=0[{composed}]"]
         last = composed
         if audio_input is not None:
             sound = f'bannersound{number}'
@@ -1210,6 +1353,10 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         # Native DirectWrite/fontconfig finds fonts without scanning every Windows .fon.
         filters += [f'[{last}]ass=filename={ass_name}[captioned]']
         last = 'captioned'
+    text_name = name.replace('.mp4', '.text.ass')
+    if write_text_ass(directory/text_name, request, segment, is_ad):
+        filters.append(f'[{last}]ass=filename={text_name}[texted]')
+        last = 'texted'
     # Pad after conversion to the output frame rate. Padding before fps can lose
     # the final resampled frames when a seek reaches a lower-fps source's EOF.
     filters += [f'[{last}]fps={request.fps}:start_time=0,tpad=stop_mode=clone:stop_duration={duration:.6f},'
@@ -1223,12 +1370,29 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         audio_filter += f',atempo={speed}'
     if delay > .001:
         audio_filter += f',adelay={round(delay*1000)}:all=1'
+    volume = request.audio.advert_volume if is_ad else request.audio.source_volume
+    volume_expression = f'{volume:.6f}'
+    if not is_ad and request.audio.ducking:
+        active = '+'.join(f'gte(t,{a:.6f})*lt(t,{z:.6f})' for _, banner, a, z, _, audio_input in banners if audio_input is not None)
+        if active:
+            volume_expression += f'*if(gt({active},0),{request.audio.duck_volume:.6f},1)'
+    audio_filter += f",volume='{volume_expression}':eval=frame"
     audio_filter += f',apad=whole_dur={duration:.6f},atrim=duration={duration:.6f}['+('mainsound' if banner_sounds else 'sound')+']'
     filters.append(audio_filter)
     if banner_sounds:
         filters.append('[mainsound]'+''.join(f'[{sound}]' for sound in banner_sounds)+
                        f'amix=inputs={len(banner_sounds)+1}:duration=first:dropout_transition=0:normalize=0[sound]')
-    args += ['-filter_complex_threads',str(min(8,os.cpu_count() or 4)),'-filter_complex',';'.join(filters),'-map','[out]','-map','[sound]',
+    audio_output = 'sound'
+    if request.audio.fade:
+        fade, out_start = request.audio.fade, segment['output_start']
+        total = segment.get('clip_duration', duration)
+        envelope = f'min(1,max(0,(t+{out_start:.6f})/{fade:.6f}))*min(1,max(0,({total-out_start:.6f}-t)/{fade:.6f}))'
+        filters.append(f"[sound]volume='{envelope}':eval=frame[fadedsound]")
+        audio_output = 'fadedsound'
+    if request.audio.limiter:
+        filters.append(f'[{audio_output}]alimiter=limit=0.95:level=false:latency=true,atrim=duration={duration:.6f}[limitedsound]')
+        audio_output = 'limitedsound'
+    args += ['-filter_complex_threads',str(min(8,os.cpu_count() or 4)),'-filter_complex',';'.join(filters),'-map','[out]','-map',f'[{audio_output}]',
              '-t',f'{duration:.6f}','-r',str(request.fps),'-fps_mode','cfr',*encoding_arguments(encoder,request.quality),
              '-c:a','aac','-ac','2','-ar','48000','-b:a','192k','-movflags','+faststart',name]
     run_ffmpeg(job_id,args,duration,progress_offset,progress_share,name.replace('.mp4','.log'))
@@ -1237,6 +1401,11 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         raise RuntimeError(f'Неполный видеосегмент {name}: проверьте исходную видеодорожку.')
     if freeze_file:
         freeze_file.unlink(missing_ok=True)
+
+
+def resolved_request(request, part, index, ad=None):
+    payload, plan = effective_payload(request.model_dump(), part.model_dump(), index, ad['duration'] if ad else 0)
+    return Render.model_validate(payload), plan
 
 
 def validate_render(request):
@@ -1253,17 +1422,31 @@ def validate_render(request):
     for banner in [request.banner, *request.banners]:
         if banner.enabled:
             asset(banner.asset_id,'banner')
-            if banner is not request.banner and banner.timebase == 'source' and banner.end > source['duration']+.05:
+            if banner is not request.banner and banner.schedule.mode == 'source' and banner.timebase == 'source' and banner.end > source['duration']+.05:
                 raise HTTPException(400,'Время баннера выходит за длительность исходного видео.')
-    ad = asset(request.advertising.asset_id,'advert') if request.advertising.enabled else None
+    ad_needed = request.advertising.enabled or any(override.advertising_enabled for override in request.clip_overrides.values())
+    ad = asset(request.advertising.asset_id,'advert') if ad_needed else None
     if ad:
         audio_index(ad,request.advertising.audio_stream_index)
-    for part in request.parts:
+    seconds, resolved = 0, []
+    for index, part in enumerate(request.parts, 1):
         try:
-            render_timeline(request,part,ad)
+            config, plan = resolved_request(request, part, index, ad)
+            for banner in config.banners:
+                asset(banner.asset_id, 'banner')
+            duration = sum(segment['duration'] for segment in plan)
+            seconds += duration
+            resolved.append((config.model_dump(), plan))
+            if config.delivery.max_duration and duration > config.delivery.max_duration+.001:
+                raise ValueError(f'Часть {index} превышает лимит итоговой длительности. Пересчитайте нарезку.')
         except ValueError as error:
             raise HTTPException(400,str(error)) from error
-    if shutil.disk_usage(DATA).free < 32*1024*1024:
+    from clipcanvas_pro import delivery_issues
+    if any(request.delivery.model_dump()[key] for key in ('require_banner','require_subtitles','min_banner_width','min_banner_height','min_banner_seconds')):
+        errors = [issue['message'] for issue in delivery_issues(request.model_dump(), resolved, asset) if issue['severity'] == 'error']
+        if errors:
+            raise HTTPException(400, 'Не выполнены требования: '+' '.join(errors[:5]))
+    if shutil.disk_usage(DATA).free < disk_estimate(request.model_dump(), seconds)['required_bytes']:
         raise HTTPException(400,'Недостаточно свободного места для экспорта.')
     return source,ad
 
@@ -1281,11 +1464,15 @@ def resolve_composition(request: Render):
     cues = [cue.model_dump() for cue in request.subtitles.cues]
     banners = [banner.model_dump() for banner in [request.banner, *request.banners] if banner.enabled]
     parts = []
-    for part in request.parts:
-        plan = render_timeline(request,part,ad)
+    for index, part in enumerate(request.parts, 1):
+        config, plan = resolved_request(request, part, index, ad)
+        cues = [cue.model_dump() for cue in config.subtitles.cues]
+        banners = [banner.model_dump() for banner in config.banners]
         parts.append({'source_start':part.start, 'source_end':part.end,
                       'duration':sum(segment['duration'] for segment in plan), 'timeline':plan,
-                      'cues':captions_for_timeline(cues,plan), 'banners':timed_items_for_timeline(banners,plan)})
+                      'cues':captions_for_timeline(cues,plan), 'banners':timed_items_for_timeline(banners,plan),
+                      'video':config.video.model_dump(), 'framing':config.framing.model_dump(),
+                      'text_layers':timed_items_for_timeline([layer.model_dump() for layer in config.text_layers if layer.enabled],plan)})
     return {'schema_version':2, 'parts':parts}
 
 
@@ -1321,7 +1508,9 @@ def render_job(job_id,request):
             completed.append(existing)
             update(job_id,files=files.copy(),outputs=outputs.copy(),completed_parts=completed.copy(),progress=(i+1)*95/len(request.parts),message=f'Часть {i+1} уже готова — пропущена')
             continue
-        plan = render_timeline(request,part,ad)
+        config, plan = resolved_request(request, part, i+1, ad)
+        clip_ad = ad if config.advertising.enabled else None
+        cues = [cue.model_dump() for cue in config.subtitles.cues]
         total_duration = sum(s['duration'] for s in plan)
         while True:
             fragments = []
@@ -1330,7 +1519,7 @@ def render_job(job_id,request):
             try:
                 for n,segment in enumerate(plan):
                     fragment = f'segment-{i+1:04d}-{n+1:04d}.mp4' if len(plan)>1 else name
-                    render_segment(job_id,request,ad if segment['kind']=='advert' else source,segment,fragment,
+                    render_segment(job_id,config,clip_ad if segment['kind']=='advert' else source,{**segment, 'clip_duration':total_duration},fragment,
                         i*95/len(request.parts)+95/len(request.parts)*segment['output_start']/total_duration,
                         95/len(request.parts)*segment['duration']/total_duration,segment['kind']=='advert',source,encoder)
                     fragments.append(fragment)
@@ -1348,12 +1537,21 @@ def render_job(job_id,request):
             run_ffmpeg(job_id,['-f','concat','-safe','1','-i',concat_name,'-map','0:v:0','-map','0:a:0','-c','copy',
                               '-t',f'{total_duration:.6f}','-movflags','+faststart',name],total_duration,
                        (i+.95)*95/len(request.parts),.05*95/len(request.parts),f'part-{i+1:02d}-concat.log')
+        if config.audio.normalize:
+            normalized = name.replace('.mp4', '.normalized.mp4')
+            run_ffmpeg(job_id, ['-i', name, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy',
+                '-af', f'loudnorm=I={config.audio.target_lufs}:TP=-1.5:LRA=11', '-c:a', 'aac', '-ar', '48000',
+                '-t', f'{total_duration:.6f}', '-movflags', '+faststart', normalized], total_duration,
+                i*95/len(request.parts), 0, f'part-{i+1:02d}-normalize.log')
+            os.replace(directory/normalized, directory/name)
         metadata = output_metadata(directory/name)
+        if config.delivery.max_size_mb and metadata['size'] > config.delivery.max_size_mb*1024*1024:
+            raise RuntimeError(f'Часть {i+1}: размер файла превышает заданный лимит.')
         if abs(metadata['duration']-total_duration) > max(.25,1/request.fps*len(plan)*2):
             raise RuntimeError(f'Часть {i+1}: длительность результата не совпадает с монтажной шкалой.')
         part_files = [file_record(job_id,name,**metadata)]
         final_cues = captions_for_timeline(cues,plan)
-        if request.subtitles.enabled and final_cues:
+        if config.subtitles.enabled and final_cues:
             srt_name = f'part-{i+1:02d}.srt'
             write_srt(directory/srt_name,final_cues)
             part_files.append(file_record(job_id,srt_name))
@@ -1571,7 +1769,7 @@ def job_summary(job):
 @app.get('/api/jobs')
 def list_jobs(summary: bool = False):
     with LOCK:
-        values = [job_summary(j) if summary else dict(j) for j in JOBS.values()]
+        values = [job_summary(j) if summary else dict(j) for j in JOBS.values() if not j.get('internal')]
         return {'jobs':sorted(values,key=lambda j:j.get('created_at',''),reverse=True)}
 
 
@@ -1590,24 +1788,38 @@ def cancel(job_id: str):
     get_job(job_id)
     with LOCK:
         job = JOBS[job_id]
-        if job['status'] not in {'queued','running'}:
+        descendants = {job_id}
+        while True:
+            children = {key for key, row in JOBS.items() if row.get('parent_id') in descendants}
+            if children <= descendants:
+                break
+            descendants.update(children)
+        active = {child for child in descendants if JOBS[child]['status'] in {'queued','running'}}
+        if not active:
             return {'status':job['status']}
-        update(job_id,cancel_requested=True,message='Остановка…')
-        future = FUTURES.get(job_id)
-        if future and future.cancel():
-            FUTURES.pop(job_id,None)
-            update(job_id,status='cancelled',message='Задача удалена из очереди.')
-        process = PROCESSES.get(job_id)
-        if process and process.poll() is None:
-            terminate_process(process)
+        update(job_id, cancel_requested=True)
+        for child in active:
+            update(child, cancel_requested=True, message='Остановка…')
+            future = FUTURES.get(child)
+            if future and future.cancel():
+                FUTURES.pop(child,None)
+                update(child,status='cancelled',message='Задача удалена из очереди.')
+        for child in descendants:
+            process = PROCESSES.get(child)
+            if process and process.poll() is None:
+                terminate_process(process)
     return {'status':JOBS[job_id]['status']}
 
 
 @app.post('/api/jobs/{job_id}/retry')
 def retry(job_id: str):
     job = get_job(job_id)
+    if job.get('internal'):
+        raise HTTPException(409,'Повторите этап через выбранные элементы его пакета.')
     if job['status'] in {'queued','running'}:
         raise HTTPException(409,'Задача уже находится в очереди.')
+    if job['type'] == 'batch' and any(job.get(key) and JOBS.get(job[key], {}).get('status') in {'queued','running'} for key in ('approval_job','archive_job')):
+        raise HTTPException(409,'Дождитесь обработки выбранных элементов пакета.')
     models = {**JOB_TYPES,'render':(Render,render_job),'sample':(Render,render_job),'preview':(Source,preview_job),
               'transcribe':(Transcribe,transcribe_job),'extract':(Extract,extract_job)}
     if job.get('type') not in models or not job.get('request'):
@@ -1690,6 +1902,29 @@ def delete_job(job_id: str):
     with LOCK:
         if job['status'] in {'queued','running'}:
             raise HTTPException(409,'Сначала остановите задачу.')
+        if job.get('internal'):
+            raise HTTPException(409,'Этап принадлежит пакету. Удалите весь пакет из истории.')
+        if any(job.get(key) and JOBS.get(job[key], {}).get('status') in {'queued','running'} for key in ('approval_job','archive_job')):
+            raise HTTPException(409,'Сначала остановите обработку выбранных элементов.')
+        if job['type'] == 'batch':
+            batch_folder = (DATA/'batches'/identifier(job_id)).resolve()
+            if batch_folder.parent != (DATA/'batches').resolve():
+                raise HTTPException(400,'Некорректный путь пакета.')
+            if batch_folder.exists():
+                shutil.rmtree(batch_folder)
+            descendants = {job_id, *[job[key] for key in ('approval_job','archive_job') if job.get(key)]}
+            while True:
+                children = {key for key,row in JOBS.items() if row.get('parent_id') in descendants}
+                if children <= descendants:
+                    break
+                descendants.update(children)
+            for child in descendants-{job_id}:
+                child_folder = (DATA/'jobs'/identifier(child)).resolve()
+                if child_folder.parent != (DATA/'jobs').resolve():
+                    raise HTTPException(400,'Некорректный путь этапа.')
+                if child_folder.exists():
+                    shutil.rmtree(child_folder)
+                JOBS.pop(child,None)
         folder = (DATA/'jobs'/identifier(job_id)).resolve()
         if folder.parent != (DATA/'jobs').resolve():
             raise HTTPException(400,'Некорректный путь.')
@@ -1713,6 +1948,12 @@ def delete_asset(asset_id: str):
                 if json.loads(path.read_text('utf-8')).get('asset_id') == asset_id:
                     raise HTTPException(409,'Баннер используется шаблоном. Сначала удалите шаблон из библиотеки.')
             except (OSError, ValueError):
+                continue
+        for path in (DATA/'delivery-profiles').glob('*.json'):
+            try:
+                if asset_id in json.dumps(json.loads(path.read_text('utf-8'))):
+                    raise HTTPException(409,'Файл используется профилем заказчика. Сначала удалите профиль.')
+            except (OSError,ValueError):
                 continue
         folder = (DATA/'uploads'/identifier(asset_id)).resolve()
         if folder.parent != (DATA/'uploads').resolve():
@@ -1770,12 +2011,18 @@ studio = register_studio_routes(app, {name: globals()[name] for name in (
     'ROOT','DATA','create_job','update','cancelled','Cancelled','LOCK','PROCESSES','JOBS',
     'asset','audio_index','cache_path','cached_result','run_ffmpeg','file_record','atomic_json',
     'extract_job','Extract','get_job','group_words','Render','Geometry','validate_render','render_timeline','probe',
-    'identifier','register_job_type')})
+    'identifier','register_job_type','resolved_request')})
 from clipcanvas_automatic import register_automatic_routes
 automatic = register_automatic_routes(app, {name: globals()[name] for name in (
     'DATA','Render','Banner','Transcribe','transcribe_job','validate_render','asset','audio_index',
     'create_job','update','cancelled','Cancelled','get_job','register_job_type','identifier','atomic_json','LOCK',
     'write_srt','file_record')}, studio)
+from clipcanvas_batch import register_batch_routes
+batch = register_batch_routes(app, {name: globals()[name] for name in (
+    'ROOT','DATA','Render','Source','Extract','Transcribe','asset','probe','audio_index','create_job','inline_job',
+    'update','cancelled','Cancelled','get_job','register_job_type','identifier','atomic_json','LOCK','JOBS',
+    'render_job','resolved_request','run_ffmpeg','file_record','save_project','extract_job','transcribe_job',
+    'validate_render','write_srt','now')}, studio, automatic)
 app.mount('/',StaticFiles(directory=str(ROOT/'web'),html=True),name='web')
 
 

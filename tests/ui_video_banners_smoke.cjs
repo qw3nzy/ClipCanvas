@@ -33,6 +33,27 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     await seek(3.25); const repeat = await pixel(200,120); assert.ok(repeat.every(n=>n>200),'repeat returns to white '+repeat);
     passed.push('MP4 remains a video; paused seeking and repeated animation change the visible frame');
 
+    await page.evaluate(() => { state.banners[0].schedule={mode:'interval',start:1,duration:1.8,interval:3,clips:[]}; changed(); requestDraw(); });
+    const scheduledSeek=async time=>{
+      await page.evaluate(t=>{sourcePreview();video.currentTime=t;requestDraw();},time);
+      await page.waitForFunction(t=>{
+        if(video.seeking||Math.abs(video.currentTime-t)>.04)return false;
+        const banners=ClipPro.previewBanners(),clock=ClipPro.outputClock();
+        const b=banners.find(b=>clock>=b.start&&clock<b.end);
+        if(!b)return banners.every(b=>!ClipVideoBanners.get(b)||ClipVideoBanners.get(b).paused);
+        const m=ClipVideoBanners.get(b);
+        return m?.readyState>=2&&!m.seeking&&Math.abs(m.currentTime-ClipVideoBanners.targetTime(b,m.duration,clock).time)<.08;
+      },time);
+      await page.evaluate(()=>requestDraw());await page.waitForTimeout(80);
+    };
+    await scheduledSeek(1.25);assert.ok((await pixel(200,120)).every(n=>n>200),'first scheduled occurrence starts white');
+    await scheduledSeek(2.25);const scheduledYellow=await pixel(200,120);assert.ok(scheduledYellow[0]>200&&scheduledYellow[1]>200&&scheduledYellow[2]<80);
+    await scheduledSeek(3.25);const between=await pixel(200,120);assert.ok(between[2]>180&&between[0]<60,'banner hidden between occurrences');
+    await scheduledSeek(4.25);assert.ok((await pixel(200,120)).every(n=>n>200),'second occurrence resets media phase');
+    assert.equal(await page.evaluate(()=>{const b=ClipPro.previewBanners();return ClipVideoBanners.get(b[0])!==ClipVideoBanners.get(b[1]);}),true);
+    await page.evaluate(()=>{state.banners[0].schedule={mode:'source'};changed();ClipVideoBanners.sync();});await seek(1.25);
+    passed.push('Scheduled video copies restart independently and disappear between occurrences');
+
     await page.locator('#bannerEyedropper').evaluate(node => { for(let p=node.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true; });
     await page.locator('#bannerEyedropper').click();
     const picker = await page.locator('#bannerKeyPreview').boundingBox();

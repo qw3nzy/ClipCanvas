@@ -85,7 +85,7 @@
   function timing(banner, details = info(banner.asset_id)) {
     const inAd = previewIndex !== null && segments[playSegment]?.kind === 'advert';
     const sourceTime = video.currentTime || 0;
-    const clock = banner.timebase === 'output' ? (previewIndex === null ? (window.ClipEditor?.sourceToOutput(sourceTime) ?? sourceTime) : timelineOffset()) : sourceTime;
+    const clock = banner.timebase === 'output' ? (window.ClipPro?.outputClock?.() ?? (previewIndex === null ? (window.ClipEditor?.sourceToOutput(sourceTime) ?? sourceTime) : timelineOffset())) : sourceTime;
     const target = targetTime(banner, details?.duration || 0, clock);
     const rawFullscreen = Boolean(document.fullscreenElement) && previewIndex === null;
     const visible = banner.enabled && clock >= banner.start && clock < banner.end && !(inAd && banner.timebase !== 'output') && !target.ended && !rawFullscreen && !previewPanel.hidden && !document.hidden;
@@ -94,9 +94,12 @@
   function sync() {
     if (synchronizing) return; synchronizing = true;
     try {
-      const banners = new Map((state.banners || []).map(b => [b.id, b]));
+      const preview = window.ClipPro?.previewBanners?.() || state.banners || [];
+      const banners = new Map(preview.map(b => [b.id, b]));
+      const originals = new Set((state.banners || []).map(b => b.id));
       for (const [id, record] of records) {
         const banner = banners.get(id);
+        if (!banner && originals.has(id)) { pauseRecord(record); continue; }
         if (!banner || banner.asset_id !== record.assetId) { if (record.attached || (!record.rejectLoad && performance.now() - record.created > 60000)) dispose(id); else pauseRecord(record); continue; }
         record.attached = true;
         const media = record.element, target = timing(banner, record.asset), transport = selectedMedia();
@@ -116,7 +119,7 @@
         if (media.paused && !record.playPending) {
           record.playPending = true;
           media.play().then(() => {
-            const current = (state.banners || []).find(b => b.id === id);
+            const current = (window.ClipPro?.previewBanners?.() || state.banners || []).find(b => b.id === id);
             if (record.disposed || !current || !timing(current, record.asset).visible || selectedMedia().paused) pauseRecord(record);
             else watchFrames(record);
           }).catch(error => { if (error.name !== 'AbortError' && !record.playError) { record.playError = true; toast('Звук или видео баннера не запустились. Нажмите воспроизведение ещё раз.'); } }).finally(() => { record.playPending = false; });

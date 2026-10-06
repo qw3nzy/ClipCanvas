@@ -110,7 +110,7 @@
     config.subtitles=structuredClone(config.subtitles);if(config.subtitles.enabled){const resolved=captionStyle(null);for(const key of Object.keys(defaults))config.subtitles[key]=resolved[key];for(const cue of config.subtitles.cues){const style=captionStyle(cue);ctx.save();ctx.font=captionFont(style);cue.render_lines=wrapWords(cue.text,state.width*style.width/100);ctx.font=captionFont({...style,size:2048});ctx.textBaseline='alphabetic';const metrics=ctx.measureText('Hg'),ascent=metrics.fontBoundingBoxAscent,descent=metrics.fontBoundingBoxDescent;if(Number.isFinite(ascent)&&Number.isFinite(descent)){ctx.font=captionFont(style);ctx.textBaseline='alphabetic';const alphabetic=ctx.measureText('Hg').actualBoundingBoxAscent;ctx.textBaseline='middle';const middle=ctx.measureText('Hg').actualBoundingBoxAscent;cue.render_font_size=style.size*(ascent+descent)/2048;cue.render_y_offset=alphabetic-middle-style.size*(ascent-descent)/4096;}ctx.restore();}}
     if(sample){let part=cuts()[Number($('sampleClip').value)||0]||selectedPart();if($('sampleMode').value==='range'){part={start:parseTime($('sampleStart').value),end:parseTime($('sampleEnd').value)};validateRange(part);}config.parts=[part];config.zip=false;}else{config.parts=config.parts.filter(part=>keptRanges(part).length);if(!config.parts.length)throw Error('Все части удалены. Восстановите хотя бы один участок.');}
     for(const part of config.parts){const kept=keptRanges(part),length=kept.reduce((sum,r)=>sum+r.end-r.start,0);if(!length)throw Error('Одна из частей полностью удалена. Измените границы или восстановите участок.');if(config.advertising.enabled&&config.advertising.profile!=='buba'&&config.advertising.start>=length)throw Error('Рекламная вставка начинается позже конца одной из частей после удалений. Уменьшите время вставки или выберите чистый экспорт.');}
-    for(const b of config.banners)if(b.enabled&&(b.start<0||b.end<=b.start||b.end>state.duration+.01))throw Error('Проверьте границы баннера «'+(b.name||'Баннер')+'».');
+    for(const b of config.banners)if(b.enabled&&(b.start<0||b.end<=b.start||((b.schedule?.mode||'source')==='source'&&b.timebase!=='output'&&b.end>state.duration+.01)))throw Error('Проверьте границы баннера «'+(b.name||'Баннер')+'».');
     return config;
   };
 
@@ -352,9 +352,9 @@
     // Existing source and advertising compositing stays shared; timed text and
     // banners follow below so both legacy and new layers share ordering.
     state.banner.enabled=false;state.subtitles.enabled=false;try{oldDraw();}finally{state.banner.enabled=legacyEnabled;state.subtitles.enabled=subEnabled;}
-    const inAd=previewIndex!==null&&segments[playSegment]?.kind==='advert',sourceTime=video.currentTime||0,outputTime=previewIndex===null?sourceToOutput(sourceTime):timelineOffset();
+    const inAd=previewIndex!==null&&segments[playSegment]?.kind==='advert',sourceTime=video.currentTime||0,outputTime=window.ClipPro?.outputClock?.()??(previewIndex===null?sourceToOutput(sourceTime):timelineOffset());
     if(!inAd&&legacyEnabled&&bannerImage&&sourceTime>=state.banner.start&&sourceTime<state.banner.end)fitDraw(bannerImage,state.geometry.banner);
-    for(const b of state.banners||[]){const t=b.timebase==='output'?outputTime:sourceTime;if(!b.enabled||t<b.start||t>=b.end||(inAd&&b.timebase!=='output'))continue;const image=videoBanners?.get(b)||bannerImages.get(b.asset_id);if(image&&(image.tagName!=='VIDEO'||(image.readyState>=2&&videoBanners.timing(b).visible)))fitDraw(bannerKeyImage(image,b),b.geometry);}
+    for(const b of window.ClipPro?.previewBanners?.()||state.banners||[]){const t=b.timebase==='output'?outputTime:sourceTime;if(!b.enabled||t<b.start||t>=b.end||(inAd&&b.timebase!=='output'))continue;const image=videoBanners?.get(b)||bannerImages.get(b.asset_id);if(image&&(image.tagName!=='VIDEO'||(image.readyState>=2&&videoBanners.timing(b).visible)))(window.ClipPro?.drawBanner?window.ClipPro.drawBanner(bannerKeyImage(image,b),b):fitDraw(bannerKeyImage(image,b),b.geometry));}
     if(!inAd&&subEnabled){const cue=activeCue(sourceTime);if(cue)drawCaptions(cue,sourceTime);}
     updateCaptionSelection();
   };

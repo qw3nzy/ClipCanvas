@@ -496,7 +496,7 @@ class Studio:
         if (directory/'speech.wav').stat().st_size < 128:
             return []
         cues, _ = asr.recognize(directory/'speech.wav', request.speech_model, request.language,
-            lambda segments: self.c['group_words'](segments, job_id, end-request.start), self.c['ROOT']/'data/models',
+            lambda segments: self.c['group_words'](segments, job_id, end-request.start), self.data/'models',
             lambda **values: self.c['update'](job_id, **values), ai.load_config()['speech_device'])
         for cue in cues:
             cue['start'] += request.start
@@ -754,17 +754,21 @@ class Studio:
     def preflight(self, payload):
         request = self.c['Render'].model_validate(payload)
         source, advert = self.c['validate_render'](request)
-        plans = [self.c['render_timeline'](request, part, advert) for part in request.parts]
+        resolved = [self.c['resolved_request'](request, part, index, advert) for index, part in enumerate(request.parts, 1)]
+        plans = [plan for config, plan in resolved]
         issues = []
         if self.c['audio_index'](source, request.audio_stream_index) is None:
             issues.append({'severity': 'warning', 'message': 'У исходника нет звука: экспорт будет с тишиной вне рекламных вставок.'})
-        if request.subtitles.enabled:
+        if any(config.subtitles.enabled for config, plan in resolved):
             cues = [c.model_dump() for c in request.subtitles.cues]
             selected_count = 0
-            for part_index, plan in enumerate(plans, 1):
+            for part_index, (config, plan) in enumerate(resolved, 1):
+                if not config.subtitles.enabled:
+                    continue
+                cues = [cue.model_dump() for cue in config.subtitles.cues]
                 selected = captions_for_timeline(cues, plan)
                 selected_count += len(selected)
-                for issue in reading_issues(selected, request.subtitles.size, request.subtitles.y, request.canvas.height):
+                for issue in reading_issues(selected, config.subtitles.size, config.subtitles.y, request.canvas.height):
                     issues.append({**issue, 'part': part_index})
                 for segment in plan:
                     if segment['kind'] != 'source':
@@ -775,7 +779,12 @@ class Studio:
                                            'message': 'Граница монтажа разрезает реплику. Проверьте её на слух.'})
             if not selected_count:
                 issues.append({'severity': 'warning', 'message': 'Субтитры включены, но в выбранных клипах нет строк.'})
+        from clipcanvas_pro import delivery_issues, disk_estimate
+        issues.extend(delivery_issues(request.model_dump(), [(config.model_dump(), plan) for config, plan in resolved],
+                                     lambda asset_id: self.c['asset'](asset_id, 'banner')))
+        seconds = sum(s['duration'] for plan in plans for s in plan)
         return {'issues': issues[:200], 'total': len(issues), 'parts': len(request.parts),
+                'disk':disk_estimate(request.model_dump(), seconds),
                 'source_seconds': round(sum(s['duration'] for plan in plans for s in plan if s['kind'] == 'source'), 2),
                 'output_seconds': round(sum(s['duration'] for plan in plans for s in plan), 2)}
 

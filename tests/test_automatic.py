@@ -57,6 +57,24 @@ class FakeStudio:
 
 
 class AutomaticTests(unittest.TestCase):
+    def test_scheduled_output_banner_is_analyzed_without_losing_schedule(self):
+        original=payload()
+        original['banners'][0].update(timebase='output', schedule={'mode':'full'},
+            motion=[{'time':0,'x':10,'y':10}])
+        self.editor.job('job', Automatic(project=original, options=AutomaticOptions(subtitles=False,
+            remove_intro=False,remove_outro=False,remove_background=False,banners=True)))
+        self.assertEqual((self.studio.layouts[0].start,self.studio.layouts[0].end),(0,100))
+        result=self.jobs['job']['project']['banners'][0]
+        self.assertEqual(result['schedule']['mode'],'full')
+        self.assertEqual((result['motion'][0]['x'],result['motion'][0]['y']),(420,24))
+
+    def test_locked_banner_keeps_position_during_automatic_layout(self):
+        original=payload();original['banners'][0]['locked']=True
+        self.editor.job('job', Automatic(project=original,options=AutomaticOptions(subtitles=False,
+            remove_intro=False,remove_outro=False,remove_background=False,banners=True)))
+        self.assertEqual(self.studio.layouts,[])
+        self.assertEqual(self.jobs['job']['project']['banners'][0]['geometry']['x'],10)
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(dir=ROOT/'.runtime/tmp')
         self.addCleanup(self.folder.cleanup)

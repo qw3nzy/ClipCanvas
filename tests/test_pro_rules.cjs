@@ -1,0 +1,12 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {proInterpolate,proScheduled}=require('../web/pro.js');
+const banner={id:'logo',enabled:true,start:90,end:100,schedule:{mode:'interval',start:2,duration:3,interval:6}};
+const before=JSON.stringify(banner);
+assert.deepEqual(proScheduled([banner],10,2).map(b=>[b.start,b.end,b.timebase]),[[2,5,'output'],[8,10,'output']]);
+assert.equal(JSON.stringify(banner),before);
+assert.equal(proScheduled([{...banner,schedule:{mode:'full',clips:[2]}}],10,1).length,0);
+assert.deepEqual(proScheduled([{...banner,schedule:{mode:'full'}}],10,1).map(b=>[b.start,b.end]),[[0,10]]);
+assert.equal(proInterpolate([{time:1,x:20},{time:3,x:100}],2,'x',0),60);
+assert.equal(proInterpolate([{time:1,x:20},{time:3,x:100}],2,'x',0,true),20);
+console.log('PASS: browser schedules, independent copies, final clipping and keyframes');

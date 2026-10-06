@@ -75,7 +75,7 @@ class Client:
             with self.opener.open(req, timeout=timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
-            raise AssertionError(f'{req.method} {path}: HTTP {exc.code}: '
+            raise AssertionError(f'{req.get_method()} {path}: HTTP {exc.code}: '
                                  + exc.read().decode('utf-8', errors='replace')) from exc
 
     def upload(self, path, kind):

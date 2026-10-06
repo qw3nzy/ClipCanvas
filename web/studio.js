@@ -155,7 +155,7 @@
     return JSON.stringify(cues.map(c => [c.start, c.end, c.text, (c.words || []).map(w => [w.start, w.end, w.text])]));
   }
   function snapshot() {
-    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean', 'banners', 'cuts', 'editor'];
+    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean', 'banners', 'cuts', 'editor', 'pro'];
     return JSON.stringify(Object.fromEntries(keys.map(key => [key, state[key]])));
   }
   function recordUndo() {
@@ -589,7 +589,7 @@
       target.append(row);
     }
   }
-  $('runPreflight').onclick = handle(async () => { const result = await post('/api/studio/preflight', renderConfig()); renderChecks(result.issues); });
+  $('runPreflight').onclick = handle(async () => { const result = await post('/api/studio/preflight', renderConfig()); const issues=[...result.issues];if(result.disk)issues.push({severity:'info',message:`Оценка места для экспорта: ${(result.disk.required_bytes/1024**3).toFixed(2)} ГБ с временными файлами. Это приблизительная величина; сложное видео может потребовать больше.`});renderChecks(issues); });
   let outputChoices = [];
   async function loadOutputs() {
     if (!connected) return;

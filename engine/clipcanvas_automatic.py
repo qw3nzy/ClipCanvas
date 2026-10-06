@@ -14,6 +14,7 @@ from clipcanvas_asr import SpeechModel
 from clipcanvas_composition import merged_cuts, retained_intervals
 from clipcanvas_layout import rotated_bounds
 from clipcanvas_studio import BoundaryAnalysis, BannerAdaptation, CaptionReview, formatted_cues
+from clipcanvas_pro import BannerSchedule, MotionPoint
 
 
 class Strict(BaseModel):
@@ -51,6 +52,13 @@ class BannerTemplate(Strict):
     volume: float = Field(default=0, ge=0, le=1)
     instructions: str = Field(default='', max_length=4000)
     layout_rules: dict = Field(default_factory=dict)
+    schedule: BannerSchedule = Field(default_factory=BannerSchedule)
+    opacity: float = Field(default=1, ge=0, le=1)
+    fade_in: float = Field(default=0, ge=0, le=10)
+    fade_out: float = Field(default=0, ge=0, le=10)
+    motion: list[MotionPoint] = Field(default_factory=list, max_length=100)
+    locked: bool = False
+    lock_aspect: bool = True
 
 
 def safe_boundary_cuts(project, boundaries, options, duration):
@@ -223,10 +231,15 @@ class AutomaticEditor:
                         record('background', 'skipped', str(error), **identity)
             if not options.banners:
                 continue
-            if banner['timebase'] != 'source':
+            if banner.get('locked'):
+                record('banner-layout', 'kept', 'Положение заблокировано пользователем.', **identity)
+                continue
+            scheduled = banner.get('schedule', {}).get('mode', 'source') != 'source'
+            if banner['timebase'] != 'source' and not scheduled:
                 record('banner-layout', 'skipped', 'Для анализа кадров переключите привязку баннера на исходник.', **identity)
                 continue
-            spans = retained_intervals(banner['start'], min(banner['end'], source['duration']), project['cuts'])
+            analysis_start, analysis_end = (0, source['duration']) if scheduled else (banner['start'], min(banner['end'], source['duration']))
+            spans = retained_intervals(analysis_start, analysis_end, project['cuts'])
             windows = [(start, min(span['end'], start+180)) for span in spans
                        for start in (span['start']+180*i for i in range(math.ceil(span['duration']/180)))]
             if not windows or len(windows) > 24:
@@ -236,7 +249,7 @@ class AutomaticEditor:
                          and (other['timebase'] != 'source' or other['start'] < banner['end'] and other['end'] > banner['start'])]
             sub = project['subtitles']
             if sub['enabled'] and sub['cues']:
-                protected.extend(subtitle_regions(sub, project['canvas'], banner['start'], banner['end']))
+                protected.extend(subtitle_regions(sub, project['canvas'], analysis_start, analysis_end))
             if len(protected) > 120:
                 record('banner-layout', 'skipped', 'Слишком много защищённых областей; положение сохранено.', **identity)
                 continue
@@ -260,6 +273,12 @@ class AutomaticEditor:
                     proposal = None
                     break
             if proposal:
+                dx, dy = proposal['x']-banner['geometry']['x'], proposal['y']-banner['geometry']['y']
+                for point in banner.get('motion', []):
+                    if point.get('x') is not None:
+                        point['x'] += dx
+                    if point.get('y') is not None:
+                        point['y'] += dy
                 banner['geometry'].update(proposal)
                 record('banner-layout', 'applied', 'Место выбрано с учётом кадров, субтитров и других баннеров.', **identity)
 
@@ -325,7 +344,8 @@ def register_banner_templates(app, context):
             banner = context['Banner'].model_validate({'enabled': True, 'asset_id': request.asset_id,
                 'start': 0, 'end': request.duration, 'geometry': request.geometry, 'chromakey': request.chromakey,
                 'instructions': request.instructions, 'layout_rules': request.layout_rules,
-                'loop': request.loop, 'offset': request.offset, 'volume': request.volume})
+                'loop': request.loop, 'offset': request.offset, 'volume': request.volume,
+                **{key:getattr(request,key) for key in ('schedule','opacity','fade_in','fade_out','motion','locked','lock_aspect')}})
             geometry = banner.geometry
             if geometry.w > request.width*4 or geometry.h > request.height*4:
                 raise ValueError('Слой слишком велик для выбранного холста.')

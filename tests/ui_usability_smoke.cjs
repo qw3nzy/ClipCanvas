@@ -1,0 +1,96 @@
+// Real browser, synthetic fixtures, actual MP4; no user media or model download.
+'use strict';
+const {chromium}=require(process.env.CLIPCANVAS_PLAYWRIGHT || 'playwright');
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+(async()=>{
+  const manifest=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+  const out=path.join(manifest.directory,'ui-usability');fs.mkdirSync(out,{recursive:true});
+  const browser=await chromium.launch({headless:true,executablePath:process.env.CLIPCANVAS_CHROMIUM});
+  const page=await browser.newPage({viewport:{width:1536,height:1050}}),errors=[],passed=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  const route=key=>page.locator('[data-route="'+key+'"]').click();
+  const idle=()=>page.waitForFunction(()=>!busy()&&!restoring&&!jobStarting,null,{timeout:120000});
+  const set=async(id,value)=>{const field=page.locator('#'+id);await field.evaluate(node=>{for(let p=node.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});if(await field.evaluate(node=>node.tagName==='SELECT'))await field.selectOption(String(value));else{await field.fill(String(value));await field.dispatchEvent('change');}};
+  async function exportSample(proceed){
+    await route('export');
+    assert.ok(await page.locator('#quickExport').isVisible());
+    assert.equal(await page.locator('.media-panel').evaluate(panel=>panel.scrollTop),0);
+    const previous=await page.evaluate(async()=>({jobs:(await api('/api/jobs')).jobs.length,settings:JSON.stringify(projectData().settings)}));
+    const response=proceed?page.waitForResponse(response=>response.url().endsWith('/api/sample')&&response.request().method()==='POST'):null;
+    await page.locator('#renderOne').click();await page.locator('#exportWarningDialog').waitFor({state:'visible'});
+    assert.ok(await page.locator('#exportWarningList li').count()>=3);
+    await page.locator(proceed?'#exportWarningContinue':'#exportWarningBack').click();
+    if(!proceed){await idle();assert.equal(await page.evaluate(async()=>(await api('/api/jobs')).jobs.length),previous.jobs);assert.equal(await page.evaluate(()=>JSON.stringify(projectData().settings)),previous.settings);return;}
+    const reply=await response;assert.equal(reply.status(),200,await reply.text());const job=await reply.json();
+    await page.waitForFunction(async id=>{const result=await api('/api/jobs/'+id);if(result.status==='error')throw Error(result.error);return result.status==='done';},job.id,{timeout:120000});
+    await idle();return page.evaluate(id=>api('/api/jobs/'+id),job.id);
+  }
+  try{
+    await page.goto(manifest.base);await page.waitForFunction(()=>connected&&window.ClipUsability);
+    assert.match(await page.locator('#clipcanvasVersion').textContent(),/3\.1\.4/);
+    const response=await page.request.get(manifest.base+'/usability.js?v=3.1.4');assert.equal(response.headers()['cache-control'],'no-store');
+    await page.evaluate(async id=>{await activateSource(await api('/api/assets/'+id));setCanvas(240,300);state.splitMode='ranges';state.ranges=[{start:0,end:3}];state.encoder='cpu';state.fps=24;syncControls();renderParts();changed();},manifest.source_id);
+    await route('design');await page.locator('#addBannerFile').setInputFiles(path.join(manifest.directory,'moving-banner.mp4'));await idle();
+    assert.deepEqual(await page.evaluate(()=>[state.banners[0].speed,state.banners[0].volume]),[1,0]);
+    assert.equal(await page.evaluate(()=>state.banners[0].schedule.mode),'each');
+    assert.match(await page.locator('#proBannerMode').inputValue(),/each/);
+    await page.locator('#bannerCenterVideo').click();
+    let geometry=await page.evaluate(()=>({...state.banners[0].geometry}));
+    const center=await page.evaluate(()=>({x:state.geometry.video.x+state.geometry.video.w/2,y:state.geometry.video.y+state.geometry.video.h/2}));
+    assert.ok(Math.abs(geometry.x+geometry.w/2-center.x)<.01);assert.ok(Math.abs(geometry.y+geometry.h/2-center.y)<.01);
+    await page.locator('#bannerBottom').click();assert.ok(await page.evaluate(()=>Math.abs(state.banners[0].geometry.y+state.banners[0].geometry.h-state.height)<.01));
+    await page.keyboard.press('Control+z');assert.deepEqual(await page.evaluate(()=>({...state.banners[0].geometry})),geometry);
+    await page.locator('#bannerSize').evaluate(input=>{input.dispatchEvent(new Event('pointerdown'));input.value='50';input.dispatchEvent(new Event('input'));});
+    await page.locator('#bannerCenterVideo').click();await page.locator('#previewBanner').click();
+    assert.ok(await page.locator('#bannerPositions').isVisible());
+    passed.push('Новичок: файл, готовое положение, размер без координат, предпросмотр и отмена');
+    await page.locator('#bannerFlowTiming').click();
+    await set('proBannerMode','interval');await set('proBannerStart',.5);await set('proBannerDuration',.7);await set('bannerRepeatGap',.8);
+    assert.ok(Math.abs(await page.evaluate(()=>state.banners[0].schedule.interval)-1.5)<.0001);
+    await set('bannerVideoSpeed',2);await page.locator('#bannerVideoSound').check();
+    await page.locator('#bannerVideoVolume').evaluate(input=>{input.dispatchEvent(new Event('pointerdown'));input.value='.4';input.dispatchEvent(new Event('input'));});
+    await page.evaluate(()=>{state.pro.delivery={...state.pro.delivery,max_duration:1,max_size_mb:.001,require_banner:true,min_banner_width:230,min_banner_height:200,min_banner_seconds:2,require_subtitles:true,check_safe_zones:true};changed();});
+    await page.evaluate(()=>saveProject(true));const saved=await page.evaluate(()=>state.projectId),banners=await page.evaluate(()=>structuredClone(state.banners));
+    await page.evaluate(async id=>applyProject(await api('/api/projects/'+id)),saved);await idle();assert.deepEqual(await page.evaluate(()=>state.banners),banners);
+    passed.push('Сохранение проекта сохраняет расписание, скорость, звук и положение баннера');
+    await route('design');await page.locator('#previewBanner').click();
+    await page.waitForTimeout(400);
+    assert.match(await page.locator('#bannerDuration').textContent(),/Показы в клипе 1: 00:00\.500–00:01\.200; 00:02\.000–00:02\.700/);
+    assert.match(await page.locator('#bannerDuration').evaluate(node=>node.nextElementSibling.textContent),/Каждый повтор запускает видео баннера заново/);
+    await page.screenshot({path:path.join(out,'banners-desktop.png'),fullPage:true});
+    await exportSample(false);passed.push('Возврат из предупреждений сохраняет настройки и не создаёт задачу');
+    const sample=await exportSample(true);assert.ok(sample.files.some(file=>file.name.endsWith('.mp4')));assert.ok(sample.issues.some(issue=>issue.message.includes('MP4 сохранён')));
+    assert.ok(await page.locator('#jobWarnings').isVisible());await page.screenshot({path:path.join(out,'export-warnings-desktop.png'),fullPage:true});
+    passed.push('Пробный MP4 со звуком и видеобаннером доступен при всех замечаниях, включая фактический размер');
+    await page.locator('#exportButton').click();await page.locator('#exportWarningDialog').waitFor({state:'visible'});await page.locator('#exportWarningContinue').click();await page.waitForFunction(()=>Boolean(state.activeJob));await idle();
+    assert.equal(await page.evaluate(async()=>(await api('/api/jobs')).jobs.find(job=>job.type==='render').status),'done');
+    passed.push('Полный экспорт использует тот же сценарий предупреждений');
+    await route('projects');
+    const temporary=await page.evaluate(async()=>{const project=projectData();delete project.id;project.name='Удаление QA';return post('/api/projects',project);});
+    await page.evaluate(async()=>refreshHistory());
+    const remove=page.locator('[data-project-id="'+temporary.id+'"]').getByRole('button',{name:'Удалить проект',exact:true});
+    await remove.click();await page.locator('#projectDeleteDialog').waitFor({state:'visible'});await page.locator('#projectDeleteCancel').click();
+    assert.equal(await page.evaluate(id=>api('/api/projects/'+id).then(p=>p.id),temporary.id),temporary.id);
+    await page.evaluate(async id=>applyProject(await api('/api/projects/'+id)),temporary.id);await idle();await route('projects');
+    await remove.click();await page.locator('#projectDeleteConfirm').click();await page.locator('#projectDeleteDialog').waitFor({state:'hidden'});
+    await page.waitForTimeout(1600);
+    assert.equal(await page.evaluate(()=>state.projectId),null);
+    assert.equal((await page.request.get(manifest.base+'/api/projects/'+temporary.id)).status(),404);
+    assert.ok(await page.evaluate(async id=>(await api('/api/assets/'+id)).id,manifest.source_id));
+    await page.evaluate(async id=>applyProject(await api('/api/projects/'+id)),saved);await idle();
+    passed.push('Удаление проекта: подтверждение и отмена, текущий редактор сбрасывается, автосохранение не воскрешает проект, исходники остаются');
+    await route('settings');await page.locator('#clearHistory').click();await page.locator('#historyCleanupDialog').waitFor({state:'visible'});assert.match(await page.locator('#historyCleanupDescription').textContent(),/Исходные файлы и готовые результаты сохранятся/);await page.locator('#historyCleanupCancel').click();
+    await page.locator('#clearHistory').click();await page.locator('#historyCleanupDialog').waitFor({state:'visible'});await page.locator('#historyCleanupConfirm').click();await page.locator('#historyCleanupDialog').waitFor({state:'hidden'});
+    await page.waitForFunction(async()=>!(await api('/api/assets')).assets.length&&!(await api('/api/jobs')).jobs.length);
+    assert.equal(await page.evaluate(()=>assets.length),0);assert.ok(await page.evaluate(async()=>Boolean((await api('/api/results')).jobs.length)));
+    await page.screenshot({path:path.join(out,'cleanup-desktop.png'),fullPage:true});
+    await page.reload();await page.waitForFunction(()=>state.sourceId&&connected&&window.ClipUsability&&!restoring);await page.waitForTimeout(1800);
+    assert.equal(await page.evaluate(()=>assets.length),0);assert.equal(await page.evaluate(async()=>(await api('/api/history')).project_operations.length),0);
+    assert.deepEqual(await page.evaluate(()=>state.banners),banners);
+    passed.push('Очистка и обновление: библиотека и история пусты, текущий проект и результаты сохранены');
+    for(const width of [736,320]){await page.setViewportSize({width,height:1050});await route('design');await page.screenshot({path:path.join(out,'banners-'+width+'.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2));}
+    passed.push('Интерфейс на 1536, 736 и 320 px без внешней горизонтальной прокрутки');
+    assert.deepEqual(errors,[]);
+    const report={passed,errors,project_id:saved,sample_job_id:sample.id,directory:out};fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+  }finally{await browser.close();}
+})().catch(error=>{console.error(error.stack||error);process.exitCode=1;});

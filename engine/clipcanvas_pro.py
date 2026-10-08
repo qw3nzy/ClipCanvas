@@ -24,25 +24,31 @@ class MotionPoint(Strict):
 
 
 class BannerSchedule(Strict):
-    mode: Literal['source', 'each', 'start', 'end', 'full', 'interval'] = 'source'
+    mode: Literal['source', 'each', 'start', 'end', 'full', 'interval', 'bubavpn'] = 'source'
     start: float = Field(default=5, ge=0, le=86400)
     duration: float = Field(default=10, ge=.1, le=86400)
     interval: float = Field(default=30, ge=.1, le=86400)
     clips: list[int] = Field(default_factory=list, max_length=1000)
+    excluded_occurrences: list[int] = Field(default_factory=list, max_length=1000)
     @model_validator(mode='after')
     def valid(self):
         if any(index < 1 or index > 1000 for index in self.clips):
             raise ValueError('Номера частей: от 1 до 1000.')
+        if any(index < 0 or index >= 1000 for index in self.excluded_occurrences):
+            raise ValueError('Номера показов: от 0 до 999.')
         if self.mode == 'interval' and self.interval < self.duration:
             raise ValueError('Интервал повторения баннера должен быть не короче показа.')
         self.clips = sorted(set(self.clips))
+        self.excluded_occurrences = sorted(set(self.excluded_occurrences))
         return self
 
 
 class AudioSettings(Strict):
+    mute_source: bool = False
     source_volume: float = Field(default=1, ge=0, le=3)
     advert_volume: float = Field(default=1, ge=0, le=3)
     ducking: bool = False
+    duck_trigger: Literal['sounding', 'visible'] = 'sounding'
     duck_volume: float = Field(default=.25, ge=0, le=1)
     fade: float = Field(default=0, ge=0, le=5)
     normalize: bool = False
@@ -144,6 +150,18 @@ def motion_expression(points, key, default, clock='t', hold=False):
     return f'if(lte(({clock}),{values[0][0]:.6f}),{values[0][1]:.6f},{result})'
 
 
+def bubavpn_starts(duration, banner_duration):
+    """Keep the first full animation centered; distribute extra full-minute shows."""
+    length = min(duration, banner_duration)
+    count = min(1000, max(1, math.floor(duration/60)))
+    centers = [duration/2]
+    for _ in range(count-1):
+        edges = [length/2, *sorted(centers), duration-length/2]
+        gap = max(zip(edges, edges[1:]), key=lambda pair: (pair[1]-pair[0], pair[0]))
+        centers.append(sum(gap)/2)
+    return [center-length/2 for center in centers], length
+
+
 def scheduled_banners(banners, duration, clip_index):
     result = []
     for original in banners:
@@ -153,9 +171,12 @@ def scheduled_banners(banners, duration, clip_index):
         if rule.clips and clip_index not in rule.clips:
             continue
         if rule.mode == 'source':
-            result.append(deepcopy(original))
+            if 0 not in rule.excluded_occurrences:
+                result.append(deepcopy(original))
             continue
-        if rule.mode == 'full':
+        if rule.mode == 'bubavpn':
+            starts, length = bubavpn_starts(duration, rule.duration)
+        elif rule.mode == 'full':
             starts, length = [0], duration
         elif rule.mode == 'end':
             starts, length = [max(0, duration-rule.start-rule.duration)], rule.duration
@@ -164,6 +185,8 @@ def scheduled_banners(banners, duration, clip_index):
             starts = [start] if rule.mode != 'interval' else [start+i*rule.interval for i in range(min(1000, max(0, math.ceil((duration-start)/rule.interval))))]
             length = rule.duration
         for occurrence, start in enumerate(starts):
+            if occurrence in rule.excluded_occurrences:
+                continue
             end = min(duration, start+length)
             if end <= start:
                 continue
@@ -180,6 +203,8 @@ def effective_payload(payload, part, index, ad_duration=0):
     for key in ('video', 'banners', 'audio', 'framing', 'text_layers'):
         if override.get(key) is not None:
             result[key] = deepcopy(override[key])
+    if payload.get('audio', {}).get('mute_source'):
+        result['audio']['mute_source'] = True
     if override.get('subtitles'):
         result['subtitles'].update({key:value for key,value in override['subtitles'].items() if value is not None})
         for cue in result['subtitles'].get('cues', []):
@@ -194,7 +219,14 @@ def effective_payload(payload, part, index, ad_duration=0):
         ad_duration/ad.get('speed', 1) if ad['enabled'] else 0, ad.get('start', 20),
         ad.get('repeat', True), ad.get('interval', 60), ad.get('placement') == 'middle')
     duration = sum(segment['duration'] for segment in plan)
-    originals = [result.get('banner', {}), *result.get('banners', [])]
+    hidden = set(override.get('hidden_banner_ids', []))
+    originals = [] if override.get('banners_enabled') is False else [
+        banner for banner in [result.get('banner', {}), *result.get('banners', [])]
+        if banner.get('id') not in hidden]
+    for banner in originals:
+        schedule = override.get('banner_schedules', {}).get(banner.get('id'))
+        if schedule is not None:
+            banner['schedule'] = deepcopy(schedule)
     result['banner'] = {'enabled': False}
     result['banners'] = scheduled_banners(originals, duration, index)
     result['parts'], result['clip_overrides'] = [part], {}
@@ -299,11 +331,16 @@ def delivery_issues(payload, parts, asset_info):
     width, height = payload['canvas']['width'], payload['canvas']['height']
     issues = []
     for index, (config, plan) in enumerate(parts, 1):
+        rules = DeliveryRules.model_validate(config.get('delivery') or payload.get('delivery') or {})
         duration = sum(segment['duration'] for segment in plan)
         def warn(message, severity='warning', **extra):
-            issues.append({'part': index, 'severity': severity, 'message': message, **extra})
+            issues.append({'part': index, 'severity': 'warning', 'message': message, **extra})
         if rules.max_duration and duration > rules.max_duration+.001:
             warn(f'Итоговая длительность {duration:.2f} с превышает лимит {rules.max_duration:g} с.', 'error')
+        if rules.max_size_mb:
+            estimated = disk_estimate({**payload, **config}, duration)['output_bytes']/1024**2
+            if estimated > rules.max_size_mb:
+                warn(f'Оценка размера {estimated:.2f} МБ выше лимита {rules.max_size_mb:g} МБ; точный размер проверим после экспорта.')
         visible = [banner for banner in timed_items_for_timeline(config['banners'], plan)
                    if banner.get('opacity', 1) > 0 and (not banner.get('motion') or any(point.get('opacity', 1) > 0 for point in banner['motion']))]
         if rules.require_banner and not visible:
@@ -315,7 +352,7 @@ def delivery_issues(payload, parts, asset_info):
             meta = asset_info(banner['asset_id'])
             seconds = banner['end']-banner['start']
             if meta.get('media_type') == 'video' and not banner.get('loop', True):
-                seconds = min(seconds, max(0, meta['duration']-banner.get('offset', 0)))
+                seconds = min(seconds, max(0, meta['duration']-banner.get('offset', 0))/banner.get('speed', 1))
             if seconds+.01 < rules.min_banner_seconds:
                 warn(f'Баннер «{banner["name"]}» виден только {seconds:.2f} с.', 'error')
             geometry = banner['geometry']

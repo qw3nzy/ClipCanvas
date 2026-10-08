@@ -17,7 +17,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
   const pixel = (x,y) => page.evaluate(([x,y]) => [...ctx.getImageData(Math.round(x*canvas.width/state.width),Math.round(y*canvas.height/state.height),1,1).data].slice(0,3), [x,y]);
   try {
     await page.goto(manifest.base); await page.waitForFunction(() => connected && window.ClipVideoBanners && window.ClipWorkflow);
-    await page.locator('#assetSelect').selectOption(manifest.source_id); await page.locator('#openAsset').click(); await page.waitForFunction(id=>state.sourceId===id && video.readyState>=2 && !busy(),manifest.source_id,{timeout:120000}); await idle();
+    await page.evaluate(async id=>activateSource(await api('/api/assets/'+id)),manifest.source_id); await page.waitForFunction(id=>state.sourceId===id && video.readyState>=2 && !busy(),manifest.source_id,{timeout:120000}); await idle();
     await route('design'); await page.locator('#addBannerFile').setInputFiles(path.join(manifest.directory,'moving-banner.mp4'));
     await page.waitForFunction(() => state.banners.length===1 && ClipVideoBanners.get(state.banners[0])?.readyState>=2, null, {timeout:120000});
     const asset = await page.evaluate(() => ClipVideoBanners.asset(state.banners[0].asset_id));
@@ -25,7 +25,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     await page.evaluate(() => {
       setCanvas(640,360); Object.assign(state.geometry.video,{x:0,y:0,w:640,h:360,fit:'stretch'}); state.background.enabled=false;
       state.splitMode='ranges'; state.ranges=[{start:0,end:8}]; state.cuts=[]; state.advertising.enabled=false; state.subtitles.enabled=false;
-      const b=state.banners[0]; Object.assign(b,{start:1,end:7,loop:true,offset:0,volume:0}); Object.assign(b.geometry,{x:40,y:40,w:320,h:160,rotation:0,fit:'stretch'});
+      const b=state.banners[0]; Object.assign(b,{start:1,end:7,loop:true,offset:0,volume:0,schedule:{mode:'source'}}); Object.assign(b.geometry,{x:40,y:40,w:320,h:160,rotation:0,fit:'stretch'});
       ClipEditor.selectBanner(b.id); syncControls(); renderParts(); changed();
     });
     await seek(1.25); const first = await pixel(200,120); assert.ok(first.every(n=>n>200), 'white first phase '+first);
@@ -67,6 +67,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     await page.locator('#bannerVideoLoop').uncheck();
     await seek(3.5); const hidden=await pixel(200,120); assert.ok(hidden[2]>180 && hidden[0]<60,'one-shot expires without freezing foreground');
     await page.locator('#bannerVideoLoop').check();
+    await page.locator('#bannerVideoSpeed').evaluate(node => { for(let p=node.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true; });
     await page.locator('#bannerVideoSpeed').selectOption('2');await seek(1.75);
     assert.equal(await page.evaluate(()=>ClipVideoBanners.get(state.banners[0]).playbackRate),2);
     const sped=await pixel(200,120);assert.ok(sped[0]>200&&sped[1]>200&&sped[2]<80,'2x changes the visible banner phase');
@@ -94,7 +95,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     await page.locator('#saveBannerTemplate').click(); await page.waitForFunction(()=>[...document.querySelectorAll('.banner-template-card strong')].some(n=>n.textContent==='Animated QA'));
     const templates=await page.evaluate(()=>api('/api/banner-templates')), template=templates.templates.find(t=>t.name==='Animated QA');
     assert.equal(template.media_type,'video'); assert.equal(template.offset,1); assert.equal(template.volume,.4); assert.equal(template.loop,true);
-    await page.locator('.banner-library>summary').click();
+    await page.locator('.banner-library').evaluate(node => { node.open=true; });
     const card=page.locator('.banner-template-card').filter({has:page.locator('strong',{hasText:'Animated QA'})}).last();
     await card.getByRole('button',{name:'Добавить',exact:true}).click(); await page.waitForFunction(()=>state.banners.length===2 && ClipVideoBanners.get(state.banners[1])?.readyState>=2);
     assert.equal(await page.evaluate(()=>ClipVideoBanners.get(state.banners[0])!==ClipVideoBanners.get(state.banners[1])),true);
@@ -124,7 +125,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
     passed.push('Automatic mode removes a video background using multiple frames and preserves playback/audio settings');
     await route('export'); await page.locator('#sampleMode').selectOption('range');
     await page.locator('#sampleStart').fill('0'); await page.locator('#sampleEnd').fill('8');
-    const response=page.waitForResponse(r=>r.url().endsWith('/api/sample') && r.request().method()==='POST');await page.locator('#renderOne').click();
+    const response=page.waitForResponse(r=>r.url().endsWith('/api/sample') && r.request().method()==='POST');await page.locator('#renderOne').click();await page.waitForFunction(()=>document.getElementById('exportWarningDialog')?.open || state.activeJob);if(await page.locator('#exportWarningDialog').evaluate(node=>node.open))await page.locator('#exportWarningContinue').click();
     const created=await (await response).json();
     await page.waitForFunction(async id=>{const j=await api('/api/jobs/'+id);if(j.status==='error')throw Error(j.error);return j.status==='done';},created.id,{timeout:120000});await idle();
     const job=await page.evaluate(id=>api('/api/jobs/'+id),created.id);assert.ok(job.files.some(f=>f.name.endsWith('.mp4')));assert.equal(job.request.banners[0].offset,1);assert.equal(job.request.banners[0].volume,.4);

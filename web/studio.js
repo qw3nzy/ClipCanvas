@@ -155,7 +155,7 @@
     return JSON.stringify(cues.map(c => [c.start, c.end, c.text, (c.words || []).map(w => [w.start, w.end, w.text])]));
   }
   function snapshot() {
-    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean', 'banners', 'cuts', 'editor', 'pro'];
+    const keys = ['width', 'height', 'geometry', 'background', 'banner', 'advertising', 'subtitles', 'splitMode', 'partSeconds', 'mergeTail', 'partCount', 'ranges', 'quality', 'encoder', 'fps', 'zip', 'exportClean', 'banners', 'cuts', 'editor', 'pro', 'bannerId', 'advertId', 'audioIndex', 'subtitleIndex', 'speechLanguage', 'speechModel'];
     return JSON.stringify(Object.fromEntries(keys.map(key => [key, state[key]])));
   }
   function recordUndo() {
@@ -507,7 +507,7 @@
 
   function showReview(job) {
     const originals = job.request?.cues || [];
-    lastReview = {job, signature: cueSignature(originals), sourceId: job.request?.source_id};
+    lastReview = {job, signature: cueSignature(originals), sourceId: job.request?.source_id, audioIndex:job.request?.audio_stream_index, context:job.client_context, clientSnapshot:job.request?.client_snapshot};
     const formatting = job.request?.mode === 'format', rows = $('captionReviewRows'); rows.replaceChildren();
     $('applyCaptionReview').textContent = formatting ? 'Применить разбивку' : 'Применить отмеченные';
     const changes = job.changes || [];
@@ -530,14 +530,17 @@
       cues: state.subtitles.cues, mode, line_length: 32, glossary: $('captionGlossary').value}, 'subtitle-review');
     await applyStudioJob(job, 'subtitle-review');
   });
-  $('applyCaptionReview').onclick = handle(() => {
-    if (!lastReview || lastReview.sourceId !== state.sourceId || lastReview.signature !== cueSignature(state.subtitles.cues)) throw Error('Субтитры изменились после запуска проверки. Повторите проверку для текущей версии.');
+  $('applyCaptionReview').onclick = handle(async () => {
+    const fingerprint=window.ClipSubtitles?.sourceFingerprint(state);
+    if (lastReview?.clientSnapshot && lastReview.clientSnapshot !== await window.ClipUsability.captionSignature()) throw Error('Исходник, дорожка, язык или текст изменились. Повторите проверку.');
+    if (fingerprint !== window.ClipSubtitles?.sourceFingerprint(state)) throw Error('Текст изменился во время применения. Повторите проверку.');
+    if (!lastReview || lastReview.sourceId !== state.sourceId || (lastReview.audioIndex ?? null) !== (state.audioIndex ?? null) || (lastReview.context && lastReview.context !== window.ClipUsability.captionContext()) || lastReview.signature !== cueSignature(state.subtitles.cues)) throw Error('Субтитры изменились после запуска проверки. Повторите проверку для текущей версии.');
     checkpoint();
     if (lastReview.job.request.mode === 'format') acceptCues(lastReview.job.reviewed_cues);
     else {
       const cues = structuredClone(state.subtitles.cues);
       for (const input of $('captionReviewRows').querySelectorAll('input:checked')) {
-        const change = lastReview.job.changes[Number(input.dataset.changeIndex)]; cues[change.index] = change.cue;
+        const change = lastReview.job.changes[Number(input.dataset.changeIndex)]; cues[change.index] = {...change.cue,manual:true};
       }
       acceptCues(cues);
     }
@@ -675,8 +678,10 @@
   }
   window.ClipStudio = {changed: onChange, refreshButtons: refreshStudioButtons, applyJobResult: applyStudioJob, refreshAI:checkAI,
     connected() { checkAI().catch(error => { $('aiStatus').textContent = error.message; }); restoreStudio(); },
-    checkpoint, undo, openTab, addParts, selectClip, refreshTimelineData, projectRestored() {
-      clearTimeout(undoTimer); undoStack = []; redoStack = []; lastSnapshot = snapshot(); restoreKey = '';
+    checkpoint, undo, openTab, addParts, selectClip, refreshTimelineData, projectRestored(options = {}) {
+      clearTimeout(undoTimer);
+      if (!options.keepUndo) { undoStack = []; redoStack = []; lastSnapshot = snapshot(); }
+      restoreKey = '';
       overview = null; images = new Map(); selected = -1; selectClip(-1); onChange();
     }};
   // Deferred scripts run before the async project restore finishes.

@@ -46,6 +46,7 @@ class Caption(Strict):
     text: str = Field(max_length=2000)
     words: list[CaptionWord] = Field(default_factory=list, max_length=1000)
     timing_quality: str = Field(default='phrase', max_length=30)
+    manual: bool = True
     appearance: dict | None = None
     render_lines: list[str] | None = Field(default=None, max_length=100)
     render_font_size: float | None = Field(default=None, ge=1, le=640)
@@ -82,6 +83,7 @@ class CaptionReview(Source):
     mode: Literal['format', 'correct'] = 'format'
     line_length: int = Field(default=32, ge=16, le=48)
     glossary: str = Field(default='', max_length=2000)
+    client_snapshot: str | None = Field(default=None, max_length=256)
 
 
 class BoundaryAnalysis(Source):
@@ -526,10 +528,10 @@ class Studio:
                 return cues
         if selected is None:
             return []
-        full_cache = self.c['cached_result'](self.c['cache_path']('asr', source, audio=selected, language=request.language, model=request.speech_model))
+        full_cache = self.c['cached_result'](self.c['cache_path']('asr', source, audio=selected, language=request.language, model=request.speech_model, revision=2))
         if full_cache:
             return full_cache['cues']
-        cache = self.c['cache_path']('analysis-asr', source, audio=selected, language=request.language, model=request.speech_model, start=request.start, end=end)
+        cache = self.c['cache_path']('analysis-asr', source, audio=selected, language=request.language, model=request.speech_model, start=request.start, end=end, revision=2)
         previous = self.c['cached_result'](cache)
         if previous:
             return previous['cues']
@@ -562,7 +564,7 @@ class Studio:
         end = min(source['duration'], request.end or source['duration'])
         if end-request.start < request.min_duration:
             raise ValueError('Диапазон короче минимального фрагмента.')
-        cache = self.c['cache_path']('highlights', source, model=ai.cache_identity(), digest=model_status.get('digest'), revision=4, **request.model_dump())
+        cache = self.c['cache_path']('highlights', source, model=ai.cache_identity(), digest=model_status.get('digest'), revision=5, **request.model_dump())
         previous = self.c['cached_result'](cache)
         if previous:
             self.c['update'](job_id, **previous, cached=True)
@@ -635,7 +637,7 @@ class Studio:
     def boundaries_job(self, job_id, request):
         source = self.c['asset'](request.source_id, 'video')
         duration = source['duration']
-        cache = self.c['cache_path']('boundaries', source, model=ai.cache_identity(), revision=6, **request.model_dump(exclude={'auto_remove'}))
+        cache = self.c['cache_path']('boundaries', source, model=ai.cache_identity(), revision=7, **request.model_dump(exclude={'auto_remove'}))
         previous = self.c['cached_result'](cache)
         if previous:
             self.c['update'](job_id, **previous, cached=True)
@@ -804,9 +806,9 @@ class Studio:
         finally:
             ai.unload()
 
-    def preflight(self, payload):
+    def preflight(self, payload, media=None):
         request = self.c['Render'].model_validate(payload)
-        source, advert = self.c['validate_render'](request)
+        source, advert = media if media is not None else self.c['validate_render'](request)
         resolved = [self.c['resolved_request'](request, part, index, advert) for index, part in enumerate(request.parts, 1)]
         plans = [plan for config, plan in resolved]
         issues = []
@@ -836,6 +838,21 @@ class Studio:
         issues.extend(delivery_issues(request.model_dump(), [(config.model_dump(), plan) for config, plan in resolved],
                                      lambda asset_id: self.c['asset'](asset_id, 'banner')))
         seconds = sum(s['duration'] for plan in plans for s in plan)
+        for index, (config, plan) in enumerate(resolved, 1):
+            ad = config.advertising
+            if not ad.enabled or not advert:
+                continue
+            if ad.profile in {'buba','floatup'} and not advert.get('audio'):
+                issues.append({'severity':'warning', 'part':index, 'message':'Выбранный рекламный профиль требует звук, но у вставки нет звуковой дорожки.'})
+            if ad.profile == 'buba':
+                geometry = (ad.geometry or config.video).model_dump()
+                scale = min(geometry['w']/advert['width'], geometry['h']/advert['height'])
+                area = (advert['width']*advert['height']*scale*scale if geometry['fit'] == 'contain' else geometry['w']*geometry['h'])/(request.canvas.width*request.canvas.height)
+                if area < .25:
+                    issues.append({'severity':'warning', 'part':index, 'message':'MEDIA BUBA: изображение рекламы занимает менее 25% кадра.'})
+                if ad.speed > 1.2:
+                    issues.append({'severity':'warning', 'part':index, 'message':'MEDIA BUBA: скорость рекламы выше 1,2×.'})
+        issues = [{**issue, 'severity':'warning'} for issue in issues]
         return {'issues': issues[:200], 'total': len(issues), 'parts': len(request.parts),
                 'disk':disk_estimate(request.model_dump(), seconds),
                 'source_seconds': round(sum(s['duration'] for plan in plans for s in plan if s['kind'] == 'source'), 2),
@@ -867,7 +884,7 @@ class Studio:
         if not meta['audio']:
             issues.append({'severity': 'warning', 'message': 'В файле нет звуковой дорожки.'})
         if file.get('duration') and abs(meta['duration']-file['duration']) > .25:
-            issues.append({'severity': 'error', 'message': 'Длительность файла отличается от сохранённой длительности экспорта.'})
+            issues.append({'severity': 'warning', 'message': 'Длительность файла отличается от сохранённой длительности экспорта. MP4 сохранён.'})
         self.c['update'](job_id, issues=issues, checked_file=file, metadata={k: meta[k] for k in ('duration', 'width', 'height', 'fps', 'audio')})
 
 

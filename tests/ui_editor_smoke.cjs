@@ -15,7 +15,17 @@ const assert = require('node:assert/strict');
   const set=async(id,value)=>{await page.locator('#'+id).evaluate(e=>{for(let p=e.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});await page.locator('#'+id).fill(String(value));await page.locator('#'+id).dispatchEvent('change');};
   const slider=async(id,value)=>page.locator('#'+id).evaluate((e,v)=>{e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));},String(value));
   const idle=()=>page.waitForFunction(()=>!busy()&&!state.activeJob,null,{timeout:180000});
-  async function job(id,endpoint){await page.locator('#'+id).evaluate(e=>{for(let p=e.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});const response=page.waitForResponse(r=>r.url().endsWith(endpoint)&&r.request().method()==='POST');await page.locator('#'+id).click();const result=await response;assert.equal(result.status(),200,await result.text());const created=await result.json();await page.waitForFunction(async id=>{const j=await(await fetch('/api/jobs/'+id)).json();if(j.status==='error')throw Error(j.error);return j.status==='done';},created.id,{timeout:180000});await idle();return created;}
+  async function job(id,endpoint){
+    await page.locator('#'+id).evaluate(e=>{for(let p=e.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
+    const response=page.waitForResponse(r=>r.url().endsWith(endpoint)&&r.request().method()==='POST');
+    await page.locator('#'+id).click();
+    if(['/api/sample','/api/render'].includes(endpoint)){
+      const warning=page.locator('#exportWarningContinue');
+      if(await Promise.race([response.then(()=>false),warning.waitFor({state:'visible'}).then(()=>true)]))await warning.click();
+    }
+    const result=await response;assert.equal(result.status(),200,await result.text());const created=await result.json();
+    await page.waitForFunction(async id=>{const j=await(await fetch('/api/jobs/'+id)).json();if(j.status==='error')throw Error(j.error);return j.status==='done';},created.id,{timeout:180000});await idle();return created;
+  }
   try{
     await page.goto(manifest.base);await page.waitForFunction(()=>window.ClipEditor&&connected);
     await route('projects');await page.locator('#assetSelect').selectOption(manifest.source_id);await page.locator('#openAsset').click();await idle();
@@ -51,12 +61,12 @@ const assert = require('node:assert/strict');
     await rows().first().getByRole('button',{name:'Объединить ↓',exact:true}).click();assert.equal(await page.evaluate(()=>state.subtitles.cues.length),2);
     passed.push('4:5 and custom canvas, blur, per-cue coordinates/style, drag, split and merge');
     await route('design');await page.locator('#addBannerFile').setInputFiles(path.join(manifest.directory,'composition','key-alpha.png'));
-    await page.waitForFunction(()=>state.banners.length===1);await set('multiBannerStart',1);await set('multiBannerEnd',4);
+    await page.waitForFunction(()=>state.banners.length===1);await page.locator('#bannerFlowTiming').click();await set('bannerClipStart','00:01');await set('bannerClipEnd','00:04');await page.locator('#bannerClipApply').click();
     await page.locator('#multiBannerControls details summary').filter({hasText:'Удаление однотонного фона'}).click();await page.locator('#bannerKeyEnabled').check();await slider('bannerTolerance',.1);await slider('bannerEdge',.02);
     await page.waitForFunction(()=>state.banners[0].chromakey.enabled);
-    assert.equal(await page.evaluate(()=>state.banners[0].start),2);
+    assert.equal(await page.evaluate(()=>state.pro.clip_overrides[1].banner_schedules[state.banners[0].id].start),1);
     await page.locator('#addBannerFile').setInputFiles(path.join(manifest.directory,'composition','key-alpha.png'));
-    await page.waitForFunction(()=>state.banners.length===2);await set('multiBannerStart',4);await set('multiBannerEnd',6);
+    await page.waitForFunction(()=>state.banners.length===2);await page.locator('#bannerFlowTiming').click();await set('bannerClipStart','00:04');await set('bannerClipEnd','00:06');await page.locator('#bannerClipApply').click();
     await page.locator('#editBannerPosition').click();await set('layerX',130);await set('layerY',20);await set('layerW',80);await set('layerH',40);
     assert.equal(await page.locator('.banner-track-bar').count(),2);
     passed.push('Multiple banners with final-time intervals, independent geometry and color removal');

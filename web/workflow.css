@@ -31,3 +31,44 @@
 .preview-panel:fullscreen h2{color:#e8eef8}.banner-library summary{font-weight:600;color:var(--accent);cursor:pointer}.banner-library[open]>summary{margin-bottom:10px}
 
 .banner-media-badge{grid-column:2;color:var(--accent)}
+/* Keep the beginner banner flow and confirmations usable on small windows. */
+.banner-step { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border, #d8dfe9); }
+.banner-step h3 { margin-top: 0; }
+#bannerPositions { flex-wrap: wrap; }
+#exportWarningDialog, #historyCleanupDialog { max-width: 660px; width: calc(100% - 32px); max-height: 85vh; overflow: auto; }
+#exportWarningList li, #jobWarnings li { margin-bottom: 8px; }
+#historyCleanup .download-list { max-height: 280px; overflow: auto; }
+.release-note { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 12px 16px; margin-bottom: 18px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
+.release-note strong { color: var(--accent); }
+.banner-flow { position: sticky; top: 0; z-index: 6; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--surface); padding: 10px 0; margin: 8px 0; border-bottom: 1px solid var(--line); }
+.banner-flow .button { padding: 8px 5px; font-size: 12px; min-height: 34px; }
+.banner-flow .button:last-child { grid-column: 1 / -1; background: var(--accent-soft); color: var(--accent); }
+.banner-explanation { padding: 12px; border-radius: 8px; background: var(--accent-soft); font-size: 12px; line-height: 1.6; }
+#bannerDuration { padding: 10px; background: var(--surface-alt); border-radius: 8px; color: var(--text); line-height: 1.6; }
+.banner-clip-range input[type=text] { font-variant-numeric: tabular-nums; }
+.banner-clip-range .action-pair { flex-wrap: wrap; margin-top: 8px; }
+#bannerSharedTiming { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+#bannerClipContext, #bannerClipTimeHelp, #bannerClipDraft { line-height: 1.6; }
+.clip-banner-manager { padding: 12px; margin: 14px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); }
+.clip-banner-manager h3 { margin-top: 0; }
+.clip-banner-manager p { font-size: 12px; line-height: 1.6; }
+.clip-banner-manager .action-pair { flex-wrap: wrap; margin: 8px 0; }
+.clip-banner-manager .button { white-space: normal; }
+.clip-banner-card { padding: 10px; margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow-wrap: anywhere; }
+.clip-banner-card strong { font-size: 12px; }
+.banner-ducking { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.banner-ducking h4 { margin: 0 0 12px; }
+.clip-banner-card .text-button { display: block; margin: 8px 0; }
+#settingsResetDialog { max-width: 620px; width: calc(100% - 32px); max-height: 85vh; overflow: auto; }
+#settingsResetDescription { line-height: 1.7; }
+.project-reset { color: #c03e3e; white-space: normal; }
+.export-intro { padding: 16px; border-radius: 10px; border: 1px solid var(--accent); background: var(--accent-soft); }
+.export-intro .action-pair { flex-wrap: wrap; }
+.project-delete { color: #c03e3e; }
+.button.danger { color: white; background: #b53030; }
+#projectDeleteDialog { max-width: 560px; width: calc(100% - 32px); }
+#projectDeleteDialog p { margin: 16px 0; line-height: 1.6; }
+#projectHistoryCleanup { margin-bottom: 10px; }
+body[data-section=projects] .editor-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+body[data-section=projects] .editor-library { margin-top: 0; min-width: 0; }
+@media(max-width:800px) { body[data-section=projects] .editor-grid { grid-template-columns: 1fr; } body[data-section=projects] .editor-library { margin-top: 18px; } }

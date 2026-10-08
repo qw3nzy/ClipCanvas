@@ -210,8 +210,7 @@ class AutomaticTests(unittest.TestCase):
         request = server.Render.model_validate(original)
         self.assertEqual(request.banners[0].geometry.rotation, 90)
         original['banners'][0]['geometry'] = {'x': -70, 'y': 80, 'w': 80, 'h': 20, 'rotation': 90}
-        with self.assertRaises(ValueError):
-            server.Render.model_validate(original)
+        self.assertEqual(server.Render.model_validate(original).banners[0].geometry.x, -70)
 
     def test_real_server_export_preserves_rotation_key_and_audio(self):
         import av

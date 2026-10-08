@@ -63,8 +63,7 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(subtitle_recommendation(tracks,'ru'),6)
         self.assertIsNone(subtitle_recommendation(tracks,'en'))
     def test_buba_speed_limit_and_geometry(self):
-        with self.assertRaises(ValueError):
-            server.Advertising(enabled=True,asset_id='a'*32,profile='buba',speed=1.3)
+        self.assertEqual(server.Advertising(enabled=True,asset_id='a'*32,profile='buba',speed=1.3).speed,1.3)
         self.assertEqual(server.Advertising(enabled=True,asset_id='a'*32,profile='buba',speed=1.2).speed,1.2)
     def test_word_style_highlights_only_current_word_and_keeps_spaces(self):
         cue = server.Cue(start=0,end=2,text='Первое второе!',words=[

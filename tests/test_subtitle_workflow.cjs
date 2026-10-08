@@ -7,7 +7,7 @@ const {test} = require('node:test');
 const {sourceFingerprint, mergeCorrections} = require('../web/subtitle-workflow.js');
 const script = fs.readFileSync(path.join(__dirname, '../web/subtitle-workflow.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
-const initial = [{start: 1, end: 2, text: 'Прежний текст'}];
+const initial = [{start: 1, end: 2, text: 'Прежний текст', manual: false}];
 const transcript = [{start: 2, end: 4, text: 'привет мир', words: [{start: 2, end: 2.5, text: 'привет'}, {start: 3, end: 4, text: 'мир'}]}];
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
 

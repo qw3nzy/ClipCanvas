@@ -49,7 +49,7 @@
   draw = function() {
     if (!document.fullscreenElement || previewIndex !== null) return composedDraw();
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (video.readyState >= 2) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (video.readyState >= 2) fitDraw(video, {x:0,y:0,w:canvas.width,h:canvas.height,fit:'stretch'});
   };
 
   // Keep common tools visible and disclose detailed controls when needed.
@@ -155,9 +155,9 @@
     const start = Math.max(part.start, Math.min(video.currentTime || part.start, part.end - .05)), end = Math.min(part.end, start + template.duration);
     if (end <= start) throw Error('Выберите участок с видео.');
     const b = {id: ClipBrowser.randomUUID(), name: template.name, asset_id: template.asset_id, enabled: true, timebase: 'source', start, end, loop: template.loop !== false, offset: Number(template.offset) || 0, volume: Number(template.volume) || 0, speed: Number(template.speed) || 1, geometry: g, chromakey: structuredClone(template.chromakey), instructions: template.instructions || '', layout_rules: structuredClone(template.layout_rules || {}), schedule: structuredClone(template.schedule || {}), opacity: template.opacity ?? 1, fade_in: template.fade_in || 0, fade_out: template.fade_out || 0, motion: (template.motion || []).map(p => ({...p, x: p.x == null ? null : p.x * rx, y: p.y == null ? null : p.y * ry})), locked: template.locked || false, lock_aspect: template.lock_aspect !== false};
-    const sourceId = state.sourceId, projectId = state.projectId;
+    const sourceId = state.sourceId, epoch = projectEpoch;
     await editor.loadBannerImage(b);
-    if (sourceId !== state.sourceId || projectId !== state.projectId || busy()) throw Error('Проект изменился. Добавьте баннер ещё раз.');
+    if (sourceId !== state.sourceId || epoch !== projectEpoch || busy()) throw Error('Проект изменился. Добавьте баннер ещё раз.');
     checkpoint(); state.banners.push(b); editor.selectBanner(b.id); editor.renderBannerList(); changed();
   }
   $('refreshBannerTemplates').onclick = handle(loadTemplates);
@@ -227,7 +227,7 @@
     if (beforeDigest !== automaticSnapshot() || job.source_id !== state.sourceId || !signature || signature !== currentDigest) { $('automaticStatus').textContent = 'Проект изменился после запуска. Результат сохранён в истории, текущий монтаж не заменён. Запустите обработку заново.'; toast($('automaticStatus').textContent); return; }
     const result = job.project; if (!result) throw Error('Движок не вернул результат монтажа.');
     checkpoint(); state.cuts = structuredClone(result.cuts || []); state.banners = structuredClone(result.banners || []);
-    if (job.automatic_report?.some(item => item.step === 'subtitles' && item.status === 'applied') && result.subtitles?.cues) state.subtitles = {...state.subtitles, ...structuredClone(result.subtitles)};
+    if (job.automatic_report?.some(item => item.step === 'subtitles' && item.status === 'applied') && result.subtitles?.cues) state.subtitles = {...state.subtitles, ...structuredClone(result.subtitles), cues:ClipSubtitles.mergeRecognition(state.subtitles.cues,result.subtitles.cues,false,state.editor?.subtitleDeleted || [])};
     state.editor ||= {}; state.editor.automaticJobId = job.id; state.editor.automaticReport = job.automatic_report || [];
     editor.projectRestored(); syncControls(); renderSubtitles(); renderParts(); previewWhole(); changed(); renderAutomaticReport();
     $('automaticStatus').textContent = 'Готово. Включён просмотр всего монтажа. Ctrl+Z отменяет изменения.';

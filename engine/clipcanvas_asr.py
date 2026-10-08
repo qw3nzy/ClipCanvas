@@ -73,7 +73,9 @@ def recognize(audio_path, model_name, language, consume, download_root, report, 
             model = WhisperModel(model_name, device=selected, compute_type=compute,
                                  cpu_threads=min(8, os.cpu_count() or 4), download_root=str(download_root))
             segments, info = model.transcribe(str(audio_path), language=None if language == 'auto' else language,
-                                             beam_size=5, vad_filter=True, word_timestamps=True)
+                                             beam_size=5, vad_filter=True, word_timestamps=True,
+                                             vad_parameters={'min_silence_duration_ms':500, 'speech_pad_ms':150},
+                                             condition_on_previous_text=False, hallucination_silence_threshold=1.0)
             # Iteration executes the GPU kernels, so fallback must cover consume, too.
             cues = consume(segments)
             return cues, info.language

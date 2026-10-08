@@ -47,7 +47,7 @@
   function dispose(id) {
     const record = records.get(id); if (!record) return;
     record.disposed = true; pauseRecord(record);
-    record.rejectLoad?.(Error('Загрузка баннера отменена.'));
+    record.rejectLoad?.(Object.assign(Error('Загрузка баннера отменена.'),{name:'AbortError'}));
     record.element.removeAttribute('src'); record.element.load(); record.element.remove();
     records.delete(id);
   }
@@ -86,7 +86,7 @@
     const inAd = previewIndex !== null && segments[playSegment]?.kind === 'advert';
     const sourceTime = video.currentTime || 0;
     const clock = banner.timebase === 'output' ? (window.ClipPro?.outputClock?.() ?? (previewIndex === null ? (window.ClipEditor?.sourceToOutput(sourceTime) ?? sourceTime) : timelineOffset())) : sourceTime;
-    const target = targetTime(banner, details?.duration || 0, clock);
+    const target = details && details.media_type !== 'video' ? {time:0,ended:false} : targetTime(banner, details?.duration || 0, clock);
     const rawFullscreen = Boolean(document.fullscreenElement) && previewIndex === null;
     const visible = banner.enabled && clock >= banner.start && clock < banner.end && !(inAd && banner.timebase !== 'output') && !target.ended && !rawFullscreen && !previewPanel.hidden && !document.hidden;
     return {...target, visible, inAd};
@@ -95,6 +95,12 @@
     if (synchronizing) return; synchronizing = true;
     try {
       const preview = window.ClipPro?.previewBanners?.() || state.banners || [];
+      const master = Math.max(0,Math.min(1,Number($('previewVolume')?.value ?? video.volume)));
+      const audio=window.ClipPro?.previewAudio?.()||{};
+      const sourceVolume = master * (audio.mute_source?0:Math.min(1,audio.source_volume??1)) * (window.ClipPro?.previewDuckGain?.(preview) ?? 1);
+      if (Math.abs(video.volume-sourceVolume) > .000001) video.volume = sourceVolume;
+      const advertVolume=master*Math.min(1,audio.advert_volume??1);
+      if(Math.abs(advertVideo.volume-advertVolume)>.000001)advertVideo.volume=advertVolume;
       const banners = new Map(preview.map(b => [b.id, b]));
       const originals = new Set((state.banners || []).map(b => b.id));
       for (const [id, record] of records) {
@@ -103,7 +109,7 @@
         if (!banner || banner.asset_id !== record.assetId) { if (record.attached || (!record.rejectLoad && performance.now() - record.created > 60000)) dispose(id); else pauseRecord(record); continue; }
         record.attached = true;
         const media = record.element, target = timing(banner, record.asset), transport = selectedMedia();
-        const master = Math.max(0, Math.min(1, video.volume)), volume = Math.max(0, Math.min(1, Number(banner.volume) || 0));
+        const volume = Math.max(0, Math.min(1, Number(banner.volume) || 0));
         media.volume = volume * master;
         media.muted = video.muted || !volume || !target.visible;
         media.loop = banner.loop !== false;
@@ -127,7 +133,7 @@
       }
       // Undo/redo can restore a previously disposed placement.
       for (const banner of banners.values()) if (info(banner.asset_id)?.media_type === 'video' && !records.has(banner.id) && !failures.has(banner.id)) {
-        load(banner).catch(error => { failures.add(banner.id); toast(error.message); });
+        load(banner).catch(error => { if (error.name === 'AbortError') return; failures.add(banner.id); toast(error.message); });
       }
     } finally { synchronizing = false; }
   }

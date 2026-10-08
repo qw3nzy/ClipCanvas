@@ -4,7 +4,22 @@
 // cancellation and source changes cannot leave half-applied AI edits behind.
 (() => {
   function sourceFingerprint(value) {
-    return JSON.stringify([value.sourceId, value.audioIndex ?? null, value.duration, value.subtitles.cues]);
+    return JSON.stringify([value.sourceId, value.audioIndex ?? null, value.subtitleIndex ?? null, value.speechLanguage, value.projectContext, value.duration, value.subtitles.cues, value.editor?.subtitleDeleted || []]);
+  }
+
+  function mergeRecognition(previous, recognized, replaceManual = false, deleted = []) {
+    const protectedCues = replaceManual ? [] : previous.filter(cue => cue.manual !== false || cue.appearance);
+    const fresh = recognized.map(cue => ({...structuredClone(cue), manual:false}));
+    let fragments = fresh;
+    for (const saved of [...protectedCues,...(replaceManual ? [] : deleted)]) fragments = fragments.flatMap(cue => {
+      if (saved.start >= cue.end || saved.end <= cue.start) return [cue];
+      if (!cue.words?.length) return [];
+      return [[cue.start,Math.min(cue.end,saved.start)],[Math.max(cue.start,saved.end),cue.end]].filter(([start,end]) => end > start).map(([start,end]) => {
+        const words = cue.words.filter(word => word.start >= start && word.end <= end);
+        return {...cue,start,end,words,text:words.map(word => word.text.trim()).join(' '),render_lines:undefined};
+      }).filter(cue => cue.words.length);
+    });
+    return [...structuredClone(protectedCues), ...fragments].sort((a,b) => a.start-b.start);
   }
 
   function mergeCorrections(cues, changes) {
@@ -14,6 +29,7 @@
       const i = change.index;
       if (!Number.isInteger(i) || i < 0 || i >= result.length || seen.has(i)) continue;
       const cue = result[i], text = typeof change.after === 'string' ? change.after.trim() : '';
+      if (cue.manual === true) continue;
       if (change.before !== cue.text || !text || text.length > 2000 || text === cue.text) continue;
       seen.add(i);
       // Only the text is accepted from AI; phrase and word times are ours.
@@ -31,7 +47,7 @@
   }
 
   if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') module.exports = {sourceFingerprint, mergeCorrections};
+    if (typeof module !== 'undefined') module.exports = {sourceFingerprint, mergeCorrections, mergeRecognition};
     return;
   }
 
@@ -45,6 +61,8 @@
       <option value="small">Меньше ресурсов · Small</option>
     </select></label>
     <p id="subtitleAudioSummary" class="muted"></p>
+    <label class="toggle-row">Сохранять ручной текст и тайм-коды<input id="subtitlePreserveManual" type="checkbox" checked></label>
+    <small class="muted">Распознавание обновляет автоматические реплики. Ручные и импортированные реплики сохраняются; снимите флажок для полной замены.</small>
     <button id="createAISubtitles" type="button" class="button primary full">Создать субтитры с ИИ</button>
     <button id="cancelAISubtitles" type="button" class="button secondary full" hidden>Остановить создание</button>
     <p id="subtitleWorkflowStatus" class="muted" role="status" aria-live="polite"></p>
@@ -106,7 +124,7 @@
     if (!sourceAsset?.audio || capabilities.asr_available === false) throw Error('Для распознавания нужны звуковая дорожка и установленный Whisper.');
     const model = options.model || modelChoice(), language = options.language || state.speechLanguage;
     if (!['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'].includes(model)) throw Error('Неизвестная модель распознавания.');
-    const token = {sourceId: state.sourceId, audioIndex: state.audioIndex, signature: sourceFingerprint(state), cancelled: false, cancelledJobs: new Set(), phase: 'transcribe'};
+    const token = {sourceId: state.sourceId, audioIndex: state.audioIndex, previous:structuredClone(state.subtitles.cues), signature: sourceFingerprint(state), cancelled: false, cancelledJobs: new Set(), phase: 'transcribe'};
     const glossary = options.glossary ?? $('captionGlossary').value;
     active = token;
     state.importBusy = true;
@@ -141,6 +159,7 @@
       if (token.cancelled) { status('Создание остановлено. Текущие субтитры сохранены.'); return {status: 'cancelled', applied: false}; }
       if (!isCurrent()) { status('Исходник, звук или текст изменились. Результат сохранён в истории и не применён.'); return {status: 'stale', applied: false}; }
       cues.forEach(validateCue);
+      cues = mergeRecognition(token.previous, cues, options.replaceManual === true || $('subtitlePreserveManual').checked === false, state.editor?.subtitleDeleted || []);
       window.ClipStudio?.checkpoint();
       acceptCues(cues);
       if (correctionError) status('Речь распознана: '+cues.length+' реплик. Правка ИИ не выполнена: '+correctionError+' Используйте «Исправить готовый текст». Ctrl+Z вернёт прежние субтитры.');
@@ -168,7 +187,7 @@
   $('createAISubtitles').onclick = handle(() => run());
   $('cancelAISubtitles').onclick = handle(cancel);
   $('cancelJob').addEventListener('click', () => { if (active) { active.cancelled = true; refresh(); } }, {capture: true});
-  window.ClipSubtitles = {run, cancel, refresh, sourceFingerprint, mergeCorrections, get running() { return Boolean(active); }};
+  window.ClipSubtitles = {run, cancel, refresh, sourceFingerprint, mergeCorrections, mergeRecognition, get running() { return Boolean(active); }};
   for (const key of ['refreshButtons', 'changed', 'projectRestored']) {
     const previous = window.ClipEditor[key];
     window.ClipEditor[key] = function (...args) { const result = previous?.apply(this, args); refresh(); return result; };

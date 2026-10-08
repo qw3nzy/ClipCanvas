@@ -263,8 +263,6 @@ class BatchEngine:
         options, warnings = request.options, []
         cues = normalize_cues(row.get('cues', []), source['duration'])
         if row.get('subtitle_error'):
-            if options.subtitles == 'required':
-                raise ValueError('Не удалось импортировать обязательные субтитры: '+row['subtitle_error'])
             warnings.append({'severity':'warning', 'message':'Файл субтитров не прочитан: '+row['subtitle_error']})
         if options.subtitles != 'none':
             if not cues:
@@ -278,17 +276,15 @@ class BatchEngine:
                 except self.c['Cancelled']:
                     raise
                 except Exception as error:
-                    if options.subtitles == 'required':
-                        raise ValueError('Обязательные субтитры не созданы: '+str(error)) from error
                     warnings.append({'severity':'warning', 'message':'Субтитры не созданы: '+str(error)})
             if not cues and options.subtitles == 'required':
-                raise ValueError('Речь или субтитры не найдены; обязательный этап не выполнен.')
+                warnings.append({'severity':'warning', 'message':'Требуемые субтитры не найдены. Экспорт продолжится без них.'})
             if cues and options.correct_subtitles:
                 try:
                     result = self.stage(job_id, rows, row, 'correction', self.studio.review_job,
                         CaptionReview(source_id=source['id'], cues=cues, mode='correct'))
                     for change in result.get('changes', []):
-                        cues[change['index']] = change['cue']
+                        cues[change['index']] = change['cue'] if not cues[change['index']].get('manual', True) else cues[change['index']]
                 except self.c['Cancelled']:
                     raise
                 except Exception as error:
@@ -333,8 +329,6 @@ class BatchEngine:
         ad = config['advertising']
         ad_duration = self.c['asset'](ad['asset_id'], 'advert')['duration'] if ad['enabled'] else 0
         target = options.seconds if options.split == 'duration' else 0
-        if limit:
-            target = min(target, limit) if target else limit
         phrase_cues = cues if options.sentence_boundaries else []
         if options.split == 'equal':
             config['parts'] = split_by_count(source['duration'], options.count, config['cuts'], phrase_cues)
@@ -346,9 +340,6 @@ class BatchEngine:
         row['preparation_issues'] = deepcopy(warnings)
         warnings.extend(check['issues'])
         row['issues'] = warnings
-        errors = [issue['message'] for issue in warnings if issue['severity'] == 'error']
-        if errors:
-            raise ValueError('Не выполнены обязательные требования: '+' '.join(errors[:5]))
         row['project_id'] = row.get('project_id') or uuid.uuid4().hex
         project = {'id':row['project_id'], 'name':row['relative_path'], 'source_id':source['id'],
             'advert_id':ad.get('asset_id'), 'banner_id':None, 'settings':project_settings(model.model_dump()),
@@ -380,6 +371,7 @@ class BatchEngine:
         check = self.studio.preflight(model.model_dump())
         row['issues'] = [*row.get('preparation_issues', []), *check['issues']]
         result = self.stage(job_id, rows, row, 'render', self.c['render_job'], model)
+        row['issues'].extend(issue for issue in result.get('issues', []) if issue not in row['issues'])
         root = self.data/'batches'/job_id
         original = Path(row['relative_path'])
         components = [output_component(piece) for piece in original.parts[:-1]]
@@ -404,8 +396,13 @@ class BatchEngine:
             movie = folder/output['name']
             thumb = f'pack-{row["index"]}-{index}.jpg'
             controller = self.controllers.get(job_id, job_id)
-            self.c['run_ffmpeg'](controller, ['-ss', str(min(1, output['duration']/2)), '-i', str(movie),
-                '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '3', thumb], .1, share=0)
+            try:
+                self.c['run_ffmpeg'](controller, ['-ss', str(min(1, output['duration']/2)), '-i', str(movie),
+                    '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '3', thumb], .1, share=0)
+            except self.c['Cancelled']:
+                raise
+            except Exception as error:
+                output_issues.append({'severity':'warning', 'part':index, 'message':'Обложка не создана; MP4 сохранён: '+str(error)})
             image = self.data/'jobs'/controller/thumb
             if image.exists():
                 thumbnail = movie.with_suffix('.jpg')
@@ -422,9 +419,14 @@ class BatchEngine:
             self.c['atomic_json'](metadata, pack)
             artifacts.append(metadata.relative_to(root).as_posix())
             if request.options.check_outputs:
-                checked = self.stage(job_id, rows, row, 'check_'+str(index), self.studio.output_job,
-                    OutputCheck(job_id=result['id'], filename=output['name']))
-                output_issues.extend({**issue, 'part':index} for issue in checked.get('issues', []))
+                try:
+                    checked = self.stage(job_id, rows, row, 'check_'+str(index), self.studio.output_job,
+                        OutputCheck(job_id=result['id'], filename=output['name']))
+                    output_issues.extend({**issue, 'severity':'warning', 'part':index} for issue in checked.get('issues', []))
+                except self.c['Cancelled']:
+                    raise
+                except Exception as error:
+                    output_issues.append({'severity':'warning', 'part':index, 'message':'Проверка результата не завершена; MP4 сохранён: '+str(error)})
         row['issues'] = [*row.get('issues', []), *output_issues]
         row.update(artifacts=artifacts, status='review' if row['issues'] else 'ready', error=None)
         self.checkpoint(job_id, rows)
@@ -598,7 +600,7 @@ def register_batch_routes(app, context, studio, automatic):
     def batches():
         with context['LOCK']:
             return {'batches':[{key:row[key] for key in ('id','status','progress','message','batch_name','batch_report','output_directory','files') if key in row}
-                               for row in sorted(context['JOBS'].values(), key=lambda row:row.get('created_at',''), reverse=True) if row['type'] == 'batch']}
+                               for row in sorted(context['JOBS'].values(), key=lambda row:row.get('created_at',''), reverse=True) if row['type'] == 'batch' and not context['history_hidden']('jobs', row['id'])]}
 
     @app.get('/api/batches/{batch_id}')
     def batch(batch_id: str):
@@ -638,6 +640,7 @@ def register_batch_routes(app, context, studio, automatic):
         if any(job.get(key) and context['get_job'](job[key])['status'] in {'queued','running'} for key in ('approval_job','archive_job')):
             raise HTTPException(409, 'Выбранные элементы уже обрабатываются.')
         rows = deepcopy(job.get('batch_items', []))
+        context['history_reveal']('jobs', batch_id)
         selected = [row for row in rows if row['index'] in request.indices]
         if len(selected) != len(set(request.indices)):
             raise HTTPException(404, 'Элемент пакета не найден.')

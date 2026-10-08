@@ -152,7 +152,13 @@ def captions_for_timeline(cues: list[dict], plan: list[dict]) -> list[dict]:
                 continue
             words = [{**w, 'start': max(a, w['start'])+shift, 'end': min(b, w['end'])+shift}
                      for w in cue.get('words', []) if w['end'] > a and w['start'] < b]
-            result.append({**cue, 'start': a+shift, 'end': b+shift, 'words': words})
+            item = {**cue, 'start': a+shift, 'end': b+shift, 'words': words}
+            if cue.get('words') and (a > cue['start']+.001 or b < cue['end']-.001):
+                item['text'] = ' '.join(w['text'].strip() for w in words).strip()
+                item.pop('render_lines', None)
+                if not item['text']:
+                    continue
+            result.append(item)
     return result
 
 

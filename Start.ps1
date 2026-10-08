@@ -70,7 +70,7 @@ function Get-Sha256([string]$Path) {
     finally { $stream.Dispose(); $algorithm.Dispose() }
 }
 function Test-Identity($Health, [string]$Instance) {
-    if ($Health.app -ne 'ClipCanvas' -or $Health.version -ne '3.0.0' -or -not $Health.root -or -not $Health.instance_id) { return $false }
+    if ($Health.app -ne 'ClipCanvas' -or $Health.version -ne '3.1.6' -or -not $Health.root -or -not $Health.instance_id) { return $false }
     if (-not [string]::Equals([IO.Path]::GetFullPath($Health.root).TrimEnd('\'),$appRoot,[StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($Instance -and $Health.instance_id -ne $Instance) { return $false }
     return $true

@@ -31,7 +31,7 @@ from clipcanvas_encoding import available_encoders, encoding_arguments, select_e
 from clipcanvas_composition import (composition_timeline, remap_after_cuts, timed_items_for_timeline,
                                    normalize_rotation, banner_rotation_filter, banner_overlay_position)
 from clipcanvas_asr import SpeechModel, recognize
-from clipcanvas_video import VideoEffects, video_effect_filters
+from clipcanvas_video import VideoEffects, VideoCrop, VideoBlur, video_effect_filters, video_crop_filter, video_blur_filters
 from clipcanvas_audio import SoundtrackSettings, probe_audio, soundtrack_elapsed, soundtrack_window
 from clipcanvas_layout import BannerRules, rotated_bounds
 from clipcanvas_pro import (MotionPoint, BannerSchedule, AudioSettings, Framing, DeliveryRules,
@@ -69,7 +69,7 @@ SESSIONS: set[str] = set()
 ALLOWED_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 if (ROOT/'allowed-origins.json').exists():
     ALLOWED_ORIGINS.update(json.loads((ROOT/'allowed-origins.json').read_text('utf-8')))
-app = FastAPI(title='ClipCanvas', version='3.1.6', docs_url=None, redoc_url=None)
+app = FastAPI(title='ClipCanvas', version='3.1.8', docs_url=None, redoc_url=None)
 
 
 def now():
@@ -367,6 +367,8 @@ class Render(Strict):
     audio: AudioSettings = Field(default_factory=AudioSettings)
     framing: Framing = Field(default_factory=Framing)
     video_effects: VideoEffects = Field(default_factory=VideoEffects)
+    video_crop: VideoCrop = Field(default_factory=VideoCrop)
+    video_blurs: list[VideoBlur] = Field(default_factory=list, max_length=20)
     soundtrack: SoundtrackSettings = Field(default_factory=SoundtrackSettings)
     delivery: DeliveryRules = Field(default_factory=DeliveryRules)
     text_layers: list[TextOverlay] = Field(default_factory=list, max_length=50)
@@ -1024,7 +1026,7 @@ def layer_filter(label, geometry, out):
     return f'[{label}]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,format=rgba,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[{out}]'
 
 
-def video_layer_filter(label, geometry, framing, start, out, effects=None):
+def video_layer_filter(label, geometry, framing, start, out, effects=None, crop=None):
     if geometry.fit != 'cover' or framing.mode == 'manual':
         result = layer_filter(label, geometry, out)
         adjustments = video_effect_filters(effects) if effects else ''
@@ -1033,6 +1035,9 @@ def video_layer_filter(label, geometry, framing, start, out, effects=None):
     clock = f'(t+{start:.6f})'
     fx = motion_expression(points, 'x', framing.x, clock, framing.interpolation == 'hold')
     fy = motion_expression(points, 'y', framing.y, clock, framing.interpolation == 'hold')
+    if crop and crop.enabled:
+        fx = f'(({fx})-{crop.x:.9f})/{crop.w:.9f}'
+        fy = f'(({fy})-{crop.y:.9f})/{crop.h:.9f}'
     w, h = even(geometry.w), even(geometry.h)
     adjustments = video_effect_filters(effects) if effects else ''
     return (f'[{label}]scale={w}:{h}:force_original_aspect_ratio=increase,'
@@ -1369,9 +1374,24 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
     adjustments = video_effect_filters(request.video_effects)
     background_adjustments = ','+adjustments if adjustments and bg.enabled else ''
     base = f'[{video_label}]setpts=(PTS-STARTPTS)/{speed},scale=iw*sar:ih,setsar=1'
+    if not is_ad and request.video_blurs:
+        filters.append(base+'[sourcebeforeblur]')
+        filters += video_blur_filters('sourcebeforeblur',request.video_blurs,'sourceblurred',
+            source['width'],source['height'],start=start,duration=duration)
+        base = '[sourceblurred]null'
+    crop_filter = video_crop_filter(request.video_crop)
+    if crop_filter and not is_ad:
+        base += ','+crop_filter
     if frozen_input is not None:
         filters.append(base+'[mainraw]')
         frozen_base = f'[{frozen_input}:v:0]setpts=PTS-STARTPTS,scale=iw*sar:ih,setsar=1'
+        if request.video_blurs:
+            filters.append(frozen_base+'[frozenbeforeblur]')
+            filters += video_blur_filters('frozenbeforeblur',request.video_blurs,'frozenblurred',
+                paused_source['width'],paused_source['height'],frozen_time=segment.get('source_position',start))
+            frozen_base = '[frozenblurred]null'
+        if crop_filter:
+            frozen_base += ','+crop_filter
         if bg.enabled:
             blur = round(bg.blur)
             bw,bh = c.width+blur*4,c.height+blur*4
@@ -1387,7 +1407,7 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         frozen_framing = request.framing.model_copy(update={'points':[],
             'x':interpolate(focus_points, focus_time, 'x', request.framing.x, request.framing.interpolation == 'hold'),
             'y':interpolate(focus_points, focus_time, 'y', request.framing.y, request.framing.interpolation == 'hold')})
-        filters += [video_layer_filter('fmain',original_geometry,frozen_framing,focus_time,'frozenforeground',request.video_effects),
+        filters += [video_layer_filter('fmain',original_geometry,frozen_framing,focus_time,'frozenforeground',request.video_effects,request.video_crop),
             f'[bgbase][frozenforeground]overlay=x={round(original_geometry.x)}:y={round(original_geometry.y)}:shortest=1[bg]']
     elif bg.enabled:
         blur = round(bg.blur)
@@ -1400,7 +1420,7 @@ def render_segment(job_id,request,source,segment,name,progress_offset,progress_s
         filters.append(f'[mainraw]format=rgba,colorkey=0x{key.get("color","#00ff00").lstrip("#")}:{key.get("similarity",.15)}:{key.get("blend",.05)}[main]')
     else:
         filters.append('[mainraw]null[main]')
-    filters += [video_layer_filter('main',geometry,request.framing,start,'foreground',request.video_effects) if not is_ad else layer_filter('main',geometry,'foreground'),f'[bg][foreground]overlay=x={round(geometry.x)}:y={round(geometry.y)}:shortest=1[composite]']
+    filters += [video_layer_filter('main',geometry,request.framing,start,'foreground',request.video_effects,request.video_crop) if not is_ad else layer_filter('main',geometry,'foreground'),f'[bg][foreground]overlay=x={round(geometry.x)}:y={round(geometry.y)}:shortest=1[composite]']
     last = 'composite'
     extra_sounds = []
     for number, (input_index, banner, a, z, record, audio_input) in enumerate(banners):

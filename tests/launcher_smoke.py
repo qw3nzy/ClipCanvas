@@ -19,6 +19,8 @@ start_fixture = fixture / 'Start.ps1'
 start_fixture.write_text(start_fixture.read_text('utf-8').replace(
     '    if (-not $pythonPath) {', "    if (-not $pythonPath) { throw 'QA fixture forbids downloads.'"), 'utf-8')
 (fixture / 'engine' / 'install.py').write_text('raise SystemExit(0)\n', 'utf-8')
+# Deliberately use a future fixture version to catch hard-coded startup checks.
+(fixture / 'engine' / 'clipcanvas_server.py').write_text("app = FastAPI(title='ClipCanvas', version='9.8.7', docs_url=None)\n", 'utf-8')
 (fixture / 'engine' / 'server.py').write_text('''import json, os, subprocess, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,7 +30,7 @@ child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],crea
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
     def do_GET(self):
-        data={'app':'ClipCanvas','version':'3.1.6','root':str(root),'instance_id':os.environ['CLIPCANVAS_INSTANCE_ID'],'pid':os.getpid()}
+        data={'app':'ClipCanvas','version':'9.8.7','root':str(root),'instance_id':os.environ['CLIPCANVAS_INSTANCE_ID'],'pid':os.getpid()}
         self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers(); self.wfile.write(json.dumps(data).encode())
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))

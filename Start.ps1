@@ -5,6 +5,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $appRoot = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
+$versionSource = [IO.File]::ReadAllText((Join-Path $appRoot 'engine\clipcanvas_server.py'))
+$versionMatch = [regex]::Match($versionSource, '(?m)^app\s*=\s*FastAPI\([^\r\n]*\bversion\s*=\s*[''"](?<version>\d+\.\d+\.\d+)[''"]')
+if (-not $versionMatch.Success) { throw 'Cannot read the ClipCanvas application version.' }
+$appVersion = $versionMatch.Groups['version'].Value
 $bindIp = $null
 if (-not [Net.IPAddress]::TryParse($BindAddress, [ref]$bindIp)) { throw 'BindAddress must be a specific IP address.' }
 if ($bindIp.Equals([Net.IPAddress]::Any) -or $bindIp.Equals([Net.IPAddress]::IPv6Any)) { throw 'Wildcard binding is disabled. Use the specific VPN IP of the PC.' }
@@ -70,7 +74,7 @@ function Get-Sha256([string]$Path) {
     finally { $stream.Dispose(); $algorithm.Dispose() }
 }
 function Test-Identity($Health, [string]$Instance) {
-    if ($Health.app -ne 'ClipCanvas' -or $Health.version -ne '3.1.6' -or -not $Health.root -or -not $Health.instance_id) { return $false }
+    if ($Health.app -ne 'ClipCanvas' -or $Health.version -ne $appVersion -or -not $Health.root -or -not $Health.instance_id) { return $false }
     if (-not [string]::Equals([IO.Path]::GetFullPath($Health.root).TrimEnd('\'),$appRoot,[StringComparison]::OrdinalIgnoreCase)) { return $false }
     if ($Instance -and $Health.instance_id -ne $Instance) { return $false }
     return $true

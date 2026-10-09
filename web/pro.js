@@ -62,6 +62,8 @@ if (typeof document === 'undefined') {
   const guide=node('a','button secondary','Полное руководство');guide.href='manual.html';guide.target='_blank';$('closeHelp').before(guide);
   const defaults = () => ({audio: proAudioSettings(),
     video_effects: {mirror:false, brightness:1, contrast:1, saturation:1},
+    video_crop: {enabled:false, x:0, y:0, w:1, h:1},
+    video_blurs: [],
     soundtrack: {enabled:false,asset_id:null,volume:1,start:0,offset:0,loop:false,pause_for_ads:true},
     framing: {mode: 'manual', subject: 'Главный говорящий персонаж', x: .5, y: .5, interpolation: 'linear', points: []},
     delivery: {platform: 'custom', max_duration: 0, max_size_mb: 0, min_banner_width: 0, min_banner_height: 0, min_banner_seconds: 0, require_banner: false, require_subtitles: false, check_safe_zones: false, safe_top: .12, safe_bottom: .20, safe_right: .17, caption_lines: 2},
@@ -129,8 +131,9 @@ if (typeof document === 'undefined') {
     if (image !== video || geometry !== state.geometry.video || geometry.fit !== 'cover' || framing.mode === 'manual' || !image.videoWidth) return previousFit(image, geometry);
     const x = proInterpolate(framing.points, video.currentTime, 'x', framing.x, framing.interpolation === 'hold');
     const y = proInterpolate(framing.points, video.currentTime, 'y', framing.y, framing.interpolation === 'hold');
-    const scale = Math.max(geometry.w / image.videoWidth, geometry.h / image.videoHeight), sw = geometry.w / scale, sh = geometry.h / scale;
-    ctx.drawImage(image, Math.max(0, Math.min(image.videoWidth - sw, image.videoWidth * x - sw / 2)), Math.max(0, Math.min(image.videoHeight - sh, image.videoHeight * y - sh / 2)), sw, sh, geometry.x, geometry.y, geometry.w, geometry.h);
+    const crop = window.ClipCrop?.sourceRect(image) || {x:0,y:0,w:image.videoWidth,h:image.videoHeight};
+    const scale = Math.max(geometry.w / crop.w, geometry.h / crop.h), sw = geometry.w / scale, sh = geometry.h / scale;
+    ctx.drawImage(window.ClipBlur?.frame(image)||image, crop.x+Math.max(0, Math.min(crop.w - sw, image.videoWidth * x - crop.x - sw / 2)), crop.y+Math.max(0, Math.min(crop.h - sh, image.videoHeight * y - crop.y - sh / 2)), sw, sh, geometry.x, geometry.y, geometry.w, geometry.h);
   };
   function drawBanner(image, b) {
     const clock = (b.timebase === 'output' ? outputClock() : video.currentTime) - b.start, g = b.geometry;

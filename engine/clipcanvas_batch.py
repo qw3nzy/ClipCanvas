@@ -160,7 +160,7 @@ def project_settings(payload):
         'subtitles':payload['subtitles'], 'audioIndex':payload.get('audio_stream_index'),
         'cuts':payload['cuts'], 'ranges':payload['parts'], 'splitMode':'ranges',
         'quality':payload['quality'], 'encoder':payload['encoder'], 'fps':payload['fps'], 'zip':False,
-        'pro':{key:payload[key] for key in ('audio','framing','delivery','text_layers','clip_overrides')}}
+        'pro':{key:payload[key] for key in ('audio','framing','delivery','text_layers','clip_overrides','video_crop','video_blurs') if key in payload}}
 
 
 class BatchEngine:

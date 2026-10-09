@@ -1,0 +1,6 @@
+.video-crop-dialog { width: min(1000px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; }
+#videoCropCanvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 58dvh; margin: auto; background: #111827; touch-action: none; cursor: crosshair; }
+#videoCropPanel .field-pair input { min-width: 0; width: 100%; box-sizing: border-box; }
+.video-crop-dialog .action-pair { display: flex; flex-wrap: wrap; }
+.video-crop-dialog .action-pair > .button { flex: 1; min-width: 180px; white-space: normal; height: auto; min-height: 40px; }
+@media (max-width: 480px) { .video-crop-dialog { padding: 16px; } }

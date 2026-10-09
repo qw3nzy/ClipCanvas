@@ -67,7 +67,7 @@ if (typeof document === 'undefined') {
   const button = (text, action, id) => { const item = node('button', 'button secondary', text); item.type = 'button'; item.onclick = handle(action); if (id) item.id = id; return item; };
   const group = title => { const item = node('section', 'editor-tool banner-step'); item.append(node('h3', '', title)); return item; };
   const version = node('div','release-note'); version.id = 'clipcanvasVersion';
-  version.append(node('strong','','ClipCanvas 3.1.6'),node('span','','Своя музыка и замена звука · Отражение и цветокоррекция'));
+  version.append(node('strong','','ClipCanvas 3.1.8'),node('span','','Блюр отдельных областей · Кадрирование · Своя музыка'));
   document.querySelector('.workspace-heading').before(version);
   const controls = $('multiBannerControls'), tools = document.querySelector('.banner-tools');
   tools.querySelector('h2').textContent = 'Видеобаннеры: настройка по шагам';
